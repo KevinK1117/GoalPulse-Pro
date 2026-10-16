@@ -1,16 +1,15 @@
 
 
 
+
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 
-const F =
-  process.env.FOOTBALL_API_BASE ||
+const F = process.env.FOOTBALL_API_BASE ||
   'https://v3.football.api-sports.io';
 
-const H =
-  process.env.HOCKEY_API_BASE ||
+const H = process.env.HOCKEY_API_BASE ||
   'https://v1.hockey.api-sports.io';
 
 const NHL = 'https://api-web.nhle.com/v1';
@@ -55,12 +54,8 @@ function sameDay(value, date) {
 
 async function apiSports(base, key, path) {
   const response = await fetch(base + path, {
-    headers: {
-      'x-apisports-key': key
-    },
-    next: {
-      revalidate: 900
-    },
+    headers: { 'x-apisports-key': key },
+    next: { revalidate: 900 },
     signal: AbortSignal.timeout(12000)
   });
 
@@ -86,9 +81,7 @@ async function apiSports(base, key, path) {
 
 async function nhlRequest(path) {
   const response = await fetch(NHL + path, {
-    next: {
-      revalidate: 900
-    },
+    next: { revalidate: 900 },
     signal: AbortSignal.timeout(12000)
   });
 
@@ -97,6 +90,23 @@ async function nhlRequest(path) {
   }
 
   return response.json();
+}
+
+function localizedName(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  return value.default || value.en || '';
+}
+
+function teamName(team) {
+  const place = localizedName(team.placeName);
+  const common = localizedName(team.commonName);
+  const full = `${place} ${common}`.trim();
+
+  return full ||
+    localizedName(team.name) ||
+    team.abbrev ||
+    'Unbekannt';
 }
 
 function normalizeGame(game, sport) {
@@ -136,17 +146,15 @@ function probabilityFromRate(goals, games, factor = 1) {
     return null;
   }
 
-  // Ein einfaches, unkalibriertes Poisson-Modell.
-  // Kleine Glättung für die Saison-Torquote.
   const lambda =
     ((goals + 0.5) / (games + 2)) * factor;
 
   return 1 - Math.exp(-lambda);
 }
 
-// ---------------------------------------
+// ===================================
 // FUSSBALL
-// ---------------------------------------
+// ===================================
 
 function footballPick(item, game) {
   const player = item.player || {};
@@ -233,9 +241,7 @@ function footballPick(item, game) {
 
 async function loadFootball(date, key, errors) {
   const fixtures = await apiSports(
-    F,
-    key,
-    `/fixtures?date=${date}`
+    F, key, `/fixtures?date=${date}`
   );
 
   const games = fixtures
@@ -252,7 +258,6 @@ async function loadFootball(date, key, errors) {
     if (!leagueMap.has(game.leagueId)) {
       leagueMap.set(game.leagueId, []);
     }
-
     leagueMap.get(game.leagueId).push(game);
   }
 
@@ -288,8 +293,6 @@ async function loadFootball(date, key, errors) {
     }
   });
 
-  // Nur für die stärksten 24 Kandidaten
-  // zusätzliche Formdaten abrufen.
   const selected = [...picks]
     .sort((a, b) => b.probability - a.probability)
     .slice(0, 24);
@@ -406,34 +409,9 @@ async function loadFootball(date, key, errors) {
   return { games, picks };
 }
 
-// ---------------------------------------
+// ===================================
 // NHL
-// ---------------------------------------
-
-function localizedName(value) {
-  if (!value) return '';
-
-  if (typeof value === 'string') {
-    return value;
-  }
-
-  return value.default || value.en || '';
-}
-
-function parseIceTime(value) {
-  if (typeof value !== 'string') return null;
-
-  const parts = value.split(':').map(Number);
-
-  if (
-    parts.length !== 2 ||
-    !parts.every(Number.isFinite)
-  ) {
-    return null;
-  }
-
-  return parts[0] + parts[1] / 60;
-}
+// ===================================
 
 function normalizeNhlGame(game) {
   const home = game.homeTeam || {};
@@ -444,14 +422,8 @@ function normalizeNhlGame(game) {
     nhlGameId: game.id,
     sport: 'Eishockey',
     league: 'NHL',
-    home:
-      localizedName(home.placeName) +
-      ' ' +
-      localizedName(home.commonName),
-    away:
-      localizedName(away.placeName) +
-      ' ' +
-      localizedName(away.commonName),
+    home: teamName(home),
+    away: teamName(away),
     homeAbbr: home.abbrev || '',
     awayAbbr: away.abbrev || '',
     time: game.startTimeUTC,
@@ -461,8 +433,6 @@ function normalizeNhlGame(game) {
 }
 
 async function loadNhlSchedule(date) {
-  // Spiele kurz nach Mitternacht in Deutschland
-  // können zum vorherigen NHL-Kalendertag gehören.
   const dates = [
     shift(date, -1),
     date,
@@ -470,18 +440,14 @@ async function loadNhlSchedule(date) {
   ];
 
   const results = await Promise.allSettled(
-    dates.map(d =>
-      nhlRequest(`/score/${d}`)
-    )
+    dates.map(d => nhlRequest(`/score/${d}`))
   );
 
   const seen = new Set();
   const games = [];
 
   for (const result of results) {
-    if (result.status !== 'fulfilled') {
-      continue;
-    }
+    if (result.status !== 'fulfilled') continue;
 
     for (const raw of result.value.games || []) {
       if (
@@ -525,6 +491,21 @@ async function loadNhlPlayerLog(
   return json.gameLog || [];
 }
 
+function parseIceTime(value) {
+  if (typeof value !== 'string') return null;
+
+  const parts = value.split(':').map(Number);
+
+  if (
+    parts.length !== 2 ||
+    !parts.every(Number.isFinite)
+  ) {
+    return null;
+  }
+
+  return parts[0] + parts[1] / 60;
+}
+
 function nhlPick(player, game, abbreviation, opponent) {
   const playerId = player.playerId;
 
@@ -532,6 +513,7 @@ function nhlPick(player, game, abbreviation, opponent) {
 
   const goals = Number(player.goals);
   const gamesPlayed = Number(player.gamesPlayed);
+  const shots = Number(player.shots);
 
   if (
     !Number.isFinite(goals) ||
@@ -556,7 +538,7 @@ function nhlPick(player, game, abbreviation, opponent) {
     player.name ||
     'NHL-Spieler';
 
-  const shots = Number(player.shots);
+  const isHome = abbreviation === game.homeAbbr;
 
   return {
     id: `nhl-${game.nhlGameId}-${playerId}`,
@@ -566,20 +548,14 @@ function nhlPick(player, game, abbreviation, opponent) {
       `https://assets.nhle.com/mugs/nhl/` +
       `${nhlSeason(game.time.slice(0, 10))}/` +
       `${abbreviation}/${playerId}.png`,
-    team:
-      abbreviation === game.homeAbbr
-        ? game.home.trim()
-        : game.away.trim(),
-    opponent,
+    team: isHome ? game.home : game.away,
+    opponent: isHome ? game.away : game.home,
     league: 'NHL',
     sport: 'Eishockey',
     fixtureId: game.id,
     time: game.time,
     probability,
-    shots:
-      Number.isFinite(shots)
-        ? shots
-        : null,
+    shots: Number.isFinite(shots) ? shots : null,
     goals,
     appearances: gamesPlayed,
     minutes: null,
@@ -599,8 +575,6 @@ async function loadNhl(date, errors) {
   }
 
   const season = nhlSeason(date);
-
-  // Höchstens 12 Teams pro Anfrage.
   const teams = new Map();
 
   for (const game of games) {
@@ -609,14 +583,14 @@ async function loadNhl(date, errors) {
     if (game.homeAbbr) {
       teams.set(game.homeAbbr, {
         game,
-        opponent: game.away.trim()
+        opponent: game.away
       });
     }
 
     if (game.awayAbbr) {
       teams.set(game.awayAbbr, {
         game,
-        opponent: game.home.trim()
+        opponent: game.home
       });
     }
   }
@@ -655,8 +629,6 @@ async function loadNhl(date, errors) {
     }
   });
 
-  // Spielprotokolle nur für die 24 stärksten
-  // NHL-Kandidaten laden.
   const selected = [...picks]
     .sort((a, b) => b.probability - a.probability)
     .slice(0, 24);
@@ -672,21 +644,15 @@ async function loadNhl(date, errors) {
   );
 
   logs.forEach((result, index) => {
-    if (result.status !== 'fulfilled') {
-      return;
-    }
+    if (result.status !== 'fulfilled') return;
 
     const pick = selected[index];
 
     const previousGames = result.value
-      .filter(game => {
-        const gameDate = game.gameDate;
-
-        return (
-          typeof gameDate === 'string' &&
-          gameDate < date
-        );
-      })
+      .filter(game =>
+        typeof game.gameDate === 'string' &&
+        game.gameDate < date
+      )
       .sort((a, b) =>
         b.gameDate.localeCompare(a.gameDate)
       )
@@ -727,15 +693,13 @@ async function loadNhl(date, errors) {
   return { games, picks };
 }
 
-// ---------------------------------------
+// ===================================
 // DEL
-// ---------------------------------------
+// ===================================
 
 async function loadDel(date, key, errors) {
   const leagues = await apiSports(
-    H,
-    key,
-    '/leagues'
+    H, key, '/leagues'
   );
 
   const del = leagues.find(
@@ -768,9 +732,9 @@ async function loadDel(date, key, errors) {
   };
 }
 
-// ---------------------------------------
+// ===================================
 // HAUPT-API
-// ---------------------------------------
+// ===================================
 
 export async function GET(request) {
   const today = berlinDate(new Date());
@@ -823,7 +787,6 @@ export async function GET(request) {
     errors.push('Football-API-Key fehlt');
   }
 
-  // NHL: öffentliche NHL-Datenquelle.
   tasks.push(
     loadNhl(date, errors)
       .then(result => {
@@ -837,7 +800,6 @@ export async function GET(request) {
       })
   );
 
-  // DEL: bisherige API-SPORTS-Anbindung.
   if (hockeyKey) {
     tasks.push(
       loadDel(date, hockeyKey, errors)
@@ -876,9 +838,9 @@ export async function GET(request) {
       notice:
         'NHL und Fußball: unkalibrierte ' +
         'Poisson-Modellschätzungen aus echten ' +
-        'Saisonstatistiken. Formdaten werden ' +
-        'nur angezeigt, wenn sie verfügbar sind. ' +
-        'DEL-Spielerstatistiken folgen.',
+        'Saisonstatistiken. Formdaten nur bei ' +
+        'Verfügbarkeit. DEL-Spielerstatistiken ' +
+        'folgen.',
       updatedAt: new Date().toISOString()
     },
     {
