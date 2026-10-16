@@ -1,0 +1,16 @@
+import {NextResponse} from 'next/server';
+export const dynamic='force-dynamic';
+const F=process.env.FOOTBALL_API_BASE||'https://v3.football.api-sports.io';
+const H=process.env.HOCKEY_API_BASE||'https://v1.hockey.api-sports.io';
+const footballLeagues=[39,40,78,140,61,135,307,203,2,3];
+// API-SPORTS league IDs can change by season; hockey IDs are resolved by league search.
+const hockeyLeagues=['NHL','DEL'];
+async function request(base,key,path){const r=await fetch(`${base}${path}`,{headers:{'x-apisports-key':key},next:{revalidate:300},signal:AbortSignal.timeout(12000)});if(!r.ok)throw new Error(`API ${r.status}`);const j=await r.json();if(j.errors&&Object.keys(j.errors).length)throw new Error(JSON.stringify(j.errors));return j.response||[]}
+const dayDE=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Berlin',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+const sameDay=(s,date)=>{try{return new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Berlin',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(s))===date}catch{return false}};
+function gameRow(game,sport){const fixture=game.fixture||game;const teams=game.teams||{};const date=fixture.date||game.date;return {id:fixture.id||game.id,sport,league:game.league?.name||'',home:teams.home?.name||'Heim',away:teams.away?.name||'Gast',time:date,status:fixture.status?.short||game.status?.short||'',homeId:teams.home?.id,awayId:teams.away?.id}}
+export async function GET(){const date=dayDE(),errors=[],games=[];const fk=process.env.APISPORTS_FOOTBALL_KEY,hk=process.env.APISPORTS_HOCKEY_KEY;
+if(fk){try{const res=await request(F,fk,`/fixtures?date=${date}`);games.push(...res.filter(g=>footballLeagues.includes(g.league?.id)).map(g=>gameRow(g,'Fußball')).filter(g=>sameDay(g.time,date)))}catch(e){errors.push('Fußball: '+e.message)}}else errors.push('Football-API-Key fehlt');
+if(hk){try{const leagues=await request(H,hk,'/leagues');const matches=leagues.filter(l=>hockeyLeagues.some(name=>(l.name||'').toUpperCase()===name));for(const l of matches){try{const res=await request(H,hk,`/games?date=${date}&league=${l.id}&season=${new Date().getFullYear()}`);games.push(...res.map(g=>gameRow(g,'Eishockey')).filter(g=>sameDay(g.time,date)))}catch(e){errors.push(`${l.name}: ${e.message}`)}}if(!matches.length)errors.push('NHL/DEL-Liga-IDs konnten nicht ermittelt werden')}catch(e){errors.push('Hockey: '+e.message)}}else errors.push('Hockey-API-Key fehlt');
+// Deliberately do not fabricate player probabilities: fixture feeds alone cannot validate scorer predictions.
+return NextResponse.json({date,games:games.filter(g=>!['FT','AET','PEN','PST','CANC','ABD','NS'].includes(g.status)||g.status==='NS'),picks:[],errors,notice:'Noch keine belastbaren Torschützenprognosen: Für Spieler-Scores werden historische Spielerdaten, Schüsse, Einsatzzeit und bestätigte Aufstellungen benötigt. Der Generator erfindet keine Prozentwerte.',updatedAt:new Date().toISOString()},{headers:{'Cache-Control':'no-store'}})}
