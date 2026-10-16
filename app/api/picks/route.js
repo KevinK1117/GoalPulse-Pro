@@ -1,5 +1,6 @@
 
 
+
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
@@ -12,484 +13,858 @@ const H =
   process.env.HOCKEY_API_BASE ||
   'https://v1.hockey.api-sports.io';
 
-const FOOTBALL = [
-  39,40,78,79,140,61,135,307,203,2,3
+const NHL = 'https://api-web.nhle.com/v1';
+
+const FOOTBALL_LEAGUES = [
+  39, 40, 78, 79, 140, 61,
+  135, 307, 203, 2, 3
 ];
 
-const HOCKEY = ['NHL','DEL'];
-
-const berlin = value =>
-  new Intl.DateTimeFormat('en-CA',{
-    timeZone:'Europe/Berlin',
-    year:'numeric',
-    month:'2-digit',
-    day:'2-digit'
+const berlinDate = value =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Berlin',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
   }).format(new Date(value));
 
-const shift = (date,n) => {
-  const d=new Date(date+'T12:00:00Z');
-  d.setUTCDate(d.getUTCDate()+n);
-  return d.toISOString().slice(0,10);
-};
+function shift(date, days) {
+  const d = new Date(date + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
 
-const sameDay = (value,date) => {
+function seasonStart(date) {
+  const year = Number(date.slice(0, 4));
+  const month = Number(date.slice(5, 7));
+  return month >= 7 ? year : year - 1;
+}
+
+function nhlSeason(date) {
+  const start = seasonStart(date);
+  return `${start}${start + 1}`;
+}
+
+function sameDay(value, date) {
   try {
-    return berlin(value)===date;
+    return berlinDate(value) === date;
   } catch {
     return false;
   }
-};
-
-async function get(base,key,path) {
-  const r=await fetch(base+path,{
-    headers:{
-      'x-apisports-key':key
-    },
-    next:{
-      revalidate:900
-    },
-    signal:AbortSignal.timeout(12000)
-  });
-
-  if(!r.ok) {
-    throw Error(`HTTP ${r.status}`);
-  }
-
-  const j=await r.json();
-
-  if(
-    j.errors &&
-    (
-      Array.isArray(j.errors)
-        ?j.errors.length
-        :Object.keys(j.errors).length
-    )
-  ) {
-    throw Error(JSON.stringify(j.errors));
-  }
-
-  return j.response||[];
 }
 
-function row(g,sport){
-  const f=g.fixture||g;
-  const t=g.teams||{};
+async function apiSports(base, key, path) {
+  const response = await fetch(base + path, {
+    headers: {
+      'x-apisports-key': key
+    },
+    next: {
+      revalidate: 900
+    },
+    signal: AbortSignal.timeout(12000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`API-SPORTS HTTP ${response.status}`);
+  }
+
+  const json = await response.json();
+
+  if (
+    json.errors &&
+    (
+      Array.isArray(json.errors)
+        ? json.errors.length > 0
+        : Object.keys(json.errors).length > 0
+    )
+  ) {
+    throw new Error(JSON.stringify(json.errors));
+  }
+
+  return json.response || [];
+}
+
+async function nhlRequest(path) {
+  const response = await fetch(NHL + path, {
+    next: {
+      revalidate: 900
+    },
+    signal: AbortSignal.timeout(12000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`NHL HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
+function normalizeGame(game, sport) {
+  const fixture = game.fixture || game;
+  const teams = game.teams || {};
 
   return {
-    id:f.id??g.id,
+    id: fixture.id ?? game.id,
     sport,
-    league:g.league?.name||'',
-    leagueId:g.league?.id,
-    home:t.home?.name||'Heim',
-    away:t.away?.name||'Gast',
-    homeId:t.home?.id,
-    awayId:t.away?.id,
-    time:f.date||g.date,
+    league: game.league?.name || '',
+    leagueId: game.league?.id ?? null,
+    home: teams.home?.name || 'Heim',
+    away: teams.away?.name || 'Gast',
+    homeId: teams.home?.id ?? null,
+    awayId: teams.away?.id ?? null,
+    time: fixture.date || game.date,
     status:
-      f.status?.short||
-      g.status?.short||
+      fixture.status?.short ||
+      game.status?.short ||
       ''
   };
 }
 
-const future = g =>
-  ![
-    'FT','AET','PEN','CANC','PST',
-    'ABD','AW','AOT','AP'
-  ].includes(g.status);
+function upcoming(game) {
+  return ![
+    'FT', 'AET', 'PEN', 'PST',
+    'CANC', 'ABD', 'AW', 'AOT', 'AP'
+  ].includes(game.status);
+}
 
-const season = date =>
-  Number(date.slice(0,4)) -
-  (Number(date.slice(5,7))<7?1:0);
-
-function makePick(item,g){
-  const player=item.player||{};
-
-  const s=(item.statistics||[]).find(
-    x=>x.league?.id===g.leagueId
-  )||item.statistics?.[0];
-
-  if(
-    !s ||
-    ![g.homeId,g.awayId].includes(s.team?.id)
+function probabilityFromRate(goals, games, factor = 1) {
+  if (
+    !Number.isFinite(goals) ||
+    !Number.isFinite(games) ||
+    games < 5
   ) {
     return null;
   }
 
-  const appearances=Number(
-    s.games?.appearences??
-    s.games?.appearances
+  // Ein einfaches, unkalibriertes Poisson-Modell.
+  // Kleine Glättung für die Saison-Torquote.
+  const lambda =
+    ((goals + 0.5) / (games + 2)) * factor;
+
+  return 1 - Math.exp(-lambda);
+}
+
+// ---------------------------------------
+// FUSSBALL
+// ---------------------------------------
+
+function footballPick(item, game) {
+  const player = item.player || {};
+
+  const stats =
+    (item.statistics || []).find(
+      s => s.league?.id === game.leagueId
+    ) ||
+    item.statistics?.[0];
+
+  if (!stats) return null;
+
+  const team = stats.team || {};
+
+  if (
+    team.id !== game.homeId &&
+    team.id !== game.awayId
+  ) {
+    return null;
+  }
+
+  const appearances = Number(
+    stats.games?.appearences ??
+    stats.games?.appearances
   );
 
-  const goals=Number(s.goals?.total);
-  const totalMinutes=Number(s.games?.minutes);
+  const goals = Number(stats.goals?.total);
+  const totalMinutes = Number(stats.games?.minutes);
 
-  if(
-    !Number.isFinite(appearances)||
-    appearances<5||
-    !Number.isFinite(goals)||
-    goals<0
+  if (
+    !Number.isFinite(appearances) ||
+    appearances < 5 ||
+    !Number.isFinite(goals)
   ) {
     return null;
   }
 
-  const minutes=
-    Number.isFinite(totalMinutes)&&totalMinutes>0
-      ?Math.round(
-        Math.min(90,totalMinutes/appearances)
-      )
-      :null;
+  const minutes =
+    Number.isFinite(totalMinutes) &&
+    totalMinutes > 0
+      ? Math.round(
+          Math.min(90, totalMinutes / appearances)
+        )
+      : null;
 
-  const lambda=
-    ((goals+0.5)/(appearances+2))*
-    (
-      minutes===null
-        ?0.85
-        :Math.max(0.35,minutes/90)
-    );
+  const factor =
+    minutes === null
+      ? 0.85
+      : Math.max(0.35, minutes / 90);
+
+  const probability = probabilityFromRate(
+    goals,
+    appearances,
+    factor
+  );
+
+  if (probability === null) return null;
 
   return {
-    id:`football-${g.id}-${player.id}`,
-    playerId:player.id,
-    name:player.name||'Spieler',
-    photo:player.photo||null,
-    team:s.team?.name||'',
+    id: `football-${game.id}-${player.id}`,
+    playerId: player.id,
+    name: player.name || 'Spieler',
+    photo: player.photo || null,
+    team: team.name || '',
     opponent:
-      s.team?.id===g.homeId
-        ?g.away
-        :g.home,
-    league:g.league,
-    sport:'Fußball',
-    fixtureId:g.id,
-    time:g.time,
-    probability:1-Math.exp(-lambda),
-    shots:s.shots?.total??null,
+      team.id === game.homeId
+        ? game.away
+        : game.home,
+    league: game.league,
+    sport: 'Fußball',
+    fixtureId: game.id,
+    time: game.time,
+    probability,
+    shots: stats.shots?.total ?? null,
     goals,
     appearances,
     minutes,
-    form:null,
-    formGames:[],
-    model:'Poisson-Basismodell (nicht kalibriert)',
-    lineupConfirmed:false
+    form: null,
+    formGames: [],
+    model: 'Poisson-Basismodell',
+    lineupConfirmed: false
   };
 }
 
-async function football(date,key,errors){
-  const raw=await get(
-    F,key,
+async function loadFootball(date, key, errors) {
+  const fixtures = await apiSports(
+    F,
+    key,
     `/fixtures?date=${date}`
   );
 
-  const games=raw
-    .filter(g=>FOOTBALL.includes(g.league?.id))
-    .map(g=>row(g,'Fußball'))
-    .filter(g=>sameDay(g.time,date)&&future(g));
+  const games = fixtures
+    .filter(g =>
+      FOOTBALL_LEAGUES.includes(g.league?.id)
+    )
+    .map(g => normalizeGame(g, 'Fußball'))
+    .filter(g => sameDay(g.time, date))
+    .filter(upcoming);
 
-  const byLeague=new Map();
+  const leagueMap = new Map();
 
-  for(const g of games){
-    if(!byLeague.has(g.leagueId)){
-      byLeague.set(g.leagueId,[]);
+  for (const game of games) {
+    if (!leagueMap.has(game.leagueId)) {
+      leagueMap.set(game.leagueId, []);
     }
 
-    byLeague.get(g.leagueId).push(g);
+    leagueMap.get(game.leagueId).push(game);
   }
 
-  const groups=[...byLeague.entries()];
+  const groups = [...leagueMap.entries()];
 
-  const results=await Promise.allSettled(
-    groups.map(async ([id,fixtures])=>{
-      const scorers=await get(
-        F,key,
-        `/players/topscorers?league=${id}&season=${season(date)}`
+  const results = await Promise.allSettled(
+    groups.map(async ([leagueId, leagueGames]) => {
+      const scorers = await apiSports(
+        F,
+        key,
+        `/players/topscorers?league=${leagueId}` +
+        `&season=${seasonStart(date)}`
       );
 
-      return fixtures.flatMap(g=>
+      return leagueGames.flatMap(game =>
         scorers
-          .map(s=>makePick(s,g))
+          .map(item => footballPick(item, game))
           .filter(Boolean)
       );
     })
   );
 
-  const picks=[];
+  const picks = [];
 
-  results.forEach((r,i)=>{
-    if(r.status==='fulfilled'){
-      picks.push(...r.value);
-    }else{
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') {
+      picks.push(...result.value);
+    } else {
       errors.push(
-        `Spielerstatistik Liga ${groups[i][0]}: `+
-        r.reason.message
+        `Fußball Liga ${groups[index][0]}: ` +
+        result.reason.message
       );
     }
   });
 
-  // Formdaten:
-  // Maximal 30 Spieler aus maximal 12 Vereinen.
-  // Die letzten fünf abgeschlossenen Spiele
-  // werden je Verein abgefragt.
+  // Nur für die stärksten 24 Kandidaten
+  // zusätzliche Formdaten abrufen.
+  const selected = [...picks]
+    .sort((a, b) => b.probability - a.probability)
+    .slice(0, 24);
 
-  const selected=picks
-    .sort((a,b)=>b.probability-a.probability)
-    .slice(0,30);
+  const teams = new Map();
 
-  const clubMap=new Map();
-
-  for(const p of selected){
-    const game=games.find(
-      g=>g.id===p.fixtureId
+  for (const pick of selected) {
+    const game = games.find(
+      g => g.id === pick.fixtureId
     );
 
-    const teamId=
-      game?.home===p.team
-        ?game.homeId
-        :game?.away===p.team
-          ?game.awayId
-          :null;
+    if (!game) continue;
 
-    if(
-      teamId &&
-      !clubMap.has(teamId)
-    ){
-      clubMap.set(teamId,[]);
+    const teamId =
+      game.home === pick.team
+        ? game.homeId
+        : game.away === pick.team
+          ? game.awayId
+          : null;
+
+    if (!teamId) continue;
+
+    if (!teams.has(teamId)) {
+      teams.set(teamId, []);
     }
 
-    if(teamId){
-      clubMap.get(teamId).push(p);
-    }
+    teams.get(teamId).push(pick);
   }
 
-  const clubs=[...clubMap.entries()]
-    .slice(0,12);
+  const teamGroups = [...teams.entries()].slice(0, 10);
 
   await Promise.allSettled(
-    clubs.map(async ([teamId,players])=>{
-      try{
-        const fixtures=await get(
-          F,key,
-          `/fixtures?team=${teamId}&last=5`
+    teamGroups.map(async ([teamId, teamPicks]) => {
+      try {
+        const previous = await apiSports(
+          F,
+          key,
+          `/fixtures?team=${teamId}&last=8`
         );
 
-        const completed=fixtures
-          .filter(f=>
-            ['FT','AET','PEN'].includes(
-              f.fixture?.status?.short
-            ) &&
-            new Date(f.fixture?.date) <
-              new Date(date+'T00:00:00Z')
+        const completed = previous
+          .filter(g =>
+            ['FT', 'AET', 'PEN'].includes(
+              g.fixture?.status?.short
+            )
+          )
+          .filter(g =>
+            new Date(g.fixture.date).getTime() <
+            new Date(date + 'T00:00:00Z').getTime()
           )
           .sort(
-            (a,b)=>
-              new Date(b.fixture.date)-
+            (a, b) =>
+              new Date(b.fixture.date) -
               new Date(a.fixture.date)
           )
-          .slice(0,5);
+          .slice(0, 5);
 
-        const perGame=await Promise.allSettled(
-          completed.map(f=>
-            get(
-              F,key,
-              `/fixtures/players?fixture=${f.fixture.id}`
+        const logs = await Promise.allSettled(
+          completed.map(g =>
+            apiSports(
+              F,
+              key,
+              `/fixtures/players?fixture=${g.fixture.id}`
             )
           )
         );
 
-        for(const p of players){
-          const form=[];
+        for (const pick of teamPicks) {
+          const formGames = [];
 
-          perGame.forEach((r,i)=>{
-            if(r.status!=='fulfilled'){
+          logs.forEach((result, index) => {
+            if (result.status !== 'fulfilled') {
               return;
             }
 
-            const teams=r.value||[];
-
-            const entry=teams
-              .flatMap(t=>t.players||[])
-              .find(x=>
-                x.player?.id===p.playerId
+            const entry = result.value
+              .flatMap(t => t.players || [])
+              .find(p =>
+                p.player?.id === pick.playerId
               );
 
-            const goals=
-              entry?.statistics?.[0]
-                ?.goals?.total;
+            const goals =
+              entry?.statistics?.[0]?.goals?.total;
 
-            if(
-              goals!==null &&
-              goals!==undefined &&
+            if (
+              goals !== null &&
+              goals !== undefined &&
               Number.isFinite(Number(goals))
-            ){
-              form.push({
-                date:completed[i].fixture.date,
-                goals:Number(goals)
+            ) {
+              formGames.push({
+                date: completed[index].fixture.date,
+                goals: Number(goals)
               });
             }
           });
 
-          p.formGames=form;
+          pick.formGames = formGames;
 
-          p.form=form.length
-            ?form.reduce(
-              (sum,x)=>sum+x.goals,
-              0
-            )
-            :null;
+          pick.form = formGames.length
+            ? formGames.reduce(
+                (sum, game) => sum + game.goals,
+                0
+              )
+            : null;
         }
-      }catch(e){
+      } catch (error) {
         errors.push(
-          `Formdaten Team ${teamId}: `+
-          e.message
+          `Fußball-Form ${teamId}: ${error.message}`
         );
       }
     })
   );
 
-  return {games,picks};
+  return { games, picks };
 }
 
-async function hockey(date,key,errors){
-  const leagues=await get(
-    H,key,
-    '/leagues'
-  );
+// ---------------------------------------
+// NHL
+// ---------------------------------------
 
-  const found=leagues.filter(l=>
-    HOCKEY.includes(
-      (l.name||'')
-        .trim()
-        .toUpperCase()
-    )
-  );
+function localizedName(value) {
+  if (!value) return '';
 
-  if(!found.length){
-    errors.push(
-      'NHL/DEL-Liga nicht gefunden'
-    );
+  if (typeof value === 'string') {
+    return value;
   }
 
-  const res=await Promise.allSettled(
-    found.map(l=>
-      get(
-        H,key,
-        `/games?date=${date}`+
-        `&league=${l.id}`+
-        `&season=${season(date)}`
-      )
+  return value.default || value.en || '';
+}
+
+function parseIceTime(value) {
+  if (typeof value !== 'string') return null;
+
+  const parts = value.split(':').map(Number);
+
+  if (
+    parts.length !== 2 ||
+    !parts.every(Number.isFinite)
+  ) {
+    return null;
+  }
+
+  return parts[0] + parts[1] / 60;
+}
+
+function normalizeNhlGame(game) {
+  const home = game.homeTeam || {};
+  const away = game.awayTeam || {};
+
+  return {
+    id: `nhl-${game.id}`,
+    nhlGameId: game.id,
+    sport: 'Eishockey',
+    league: 'NHL',
+    home:
+      localizedName(home.placeName) +
+      ' ' +
+      localizedName(home.commonName),
+    away:
+      localizedName(away.placeName) +
+      ' ' +
+      localizedName(away.commonName),
+    homeAbbr: home.abbrev || '',
+    awayAbbr: away.abbrev || '',
+    time: game.startTimeUTC,
+    status: game.gameState || '',
+    gameType: game.gameType || 2
+  };
+}
+
+async function loadNhlSchedule(date) {
+  // Spiele kurz nach Mitternacht in Deutschland
+  // können zum vorherigen NHL-Kalendertag gehören.
+  const dates = [
+    shift(date, -1),
+    date,
+    shift(date, 1)
+  ];
+
+  const results = await Promise.allSettled(
+    dates.map(d =>
+      nhlRequest(`/score/${d}`)
     )
   );
 
-  const games=[];
+  const seen = new Set();
+  const games = [];
 
-  res.forEach((r,i)=>{
-    if(r.status==='fulfilled'){
-      games.push(
-        ...r.value
-          .map(g=>row(g,'Eishockey'))
-          .filter(g=>
-            sameDay(g.time,date)&&future(g)
-          )
+  for (const result of results) {
+    if (result.status !== 'fulfilled') {
+      continue;
+    }
+
+    for (const raw of result.value.games || []) {
+      if (
+        !sameDay(raw.startTimeUTC, date) ||
+        !['FUT', 'PRE'].includes(raw.gameState)
+      ) {
+        continue;
+      }
+
+      if (seen.has(raw.id)) continue;
+
+      seen.add(raw.id);
+      games.push(normalizeNhlGame(raw));
+    }
+  }
+
+  return games;
+}
+
+async function loadNhlTeamStats(
+  abbreviation,
+  season,
+  gameType
+) {
+  const json = await nhlRequest(
+    `/club-stats/${abbreviation}/${season}/${gameType}`
+  );
+
+  return json.skaters || [];
+}
+
+async function loadNhlPlayerLog(
+  playerId,
+  season,
+  gameType
+) {
+  const json = await nhlRequest(
+    `/player/${playerId}/game-log/${season}/${gameType}`
+  );
+
+  return json.gameLog || [];
+}
+
+function nhlPick(player, game, abbreviation, opponent) {
+  const playerId = player.playerId;
+
+  if (!playerId) return null;
+
+  const goals = Number(player.goals);
+  const gamesPlayed = Number(player.gamesPlayed);
+
+  if (
+    !Number.isFinite(goals) ||
+    !Number.isFinite(gamesPlayed) ||
+    gamesPlayed < 5
+  ) {
+    return null;
+  }
+
+  const probability = probabilityFromRate(
+    goals,
+    gamesPlayed
+  );
+
+  if (probability === null) return null;
+
+  const firstName = localizedName(player.firstName);
+  const lastName = localizedName(player.lastName);
+
+  const name =
+    `${firstName} ${lastName}`.trim() ||
+    player.name ||
+    'NHL-Spieler';
+
+  const shots = Number(player.shots);
+
+  return {
+    id: `nhl-${game.nhlGameId}-${playerId}`,
+    playerId,
+    name,
+    photo:
+      `https://assets.nhle.com/mugs/nhl/` +
+      `${nhlSeason(game.time.slice(0, 10))}/` +
+      `${abbreviation}/${playerId}.png`,
+    team:
+      abbreviation === game.homeAbbr
+        ? game.home.trim()
+        : game.away.trim(),
+    opponent,
+    league: 'NHL',
+    sport: 'Eishockey',
+    fixtureId: game.id,
+    time: game.time,
+    probability,
+    shots:
+      Number.isFinite(shots)
+        ? shots
+        : null,
+    goals,
+    appearances: gamesPlayed,
+    minutes: null,
+    form: null,
+    formGames: [],
+    model: 'Poisson-Basismodell',
+    lineupConfirmed: false
+  };
+}
+
+async function loadNhl(date, errors) {
+  const games = await loadNhlSchedule(date);
+  const picks = [];
+
+  if (!games.length) {
+    return { games, picks };
+  }
+
+  const season = nhlSeason(date);
+
+  // Höchstens 12 Teams pro Anfrage.
+  const teams = new Map();
+
+  for (const game of games) {
+    if (game.gameType !== 2) continue;
+
+    if (game.homeAbbr) {
+      teams.set(game.homeAbbr, {
+        game,
+        opponent: game.away.trim()
+      });
+    }
+
+    if (game.awayAbbr) {
+      teams.set(game.awayAbbr, {
+        game,
+        opponent: game.home.trim()
+      });
+    }
+  }
+
+  const entries = [...teams.entries()].slice(0, 12);
+
+  const results = await Promise.allSettled(
+    entries.map(async ([abbr, info]) => {
+      const skaters = await loadNhlTeamStats(
+        abbr,
+        season,
+        2
       );
-    }else{
+
+      return skaters
+        .map(player =>
+          nhlPick(
+            player,
+            info.game,
+            abbr,
+            info.opponent
+          )
+        )
+        .filter(Boolean);
+    })
+  );
+
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') {
+      picks.push(...result.value);
+    } else {
       errors.push(
-        `${found[i].name}: `+
-        r.reason.message
+        `NHL ${entries[index][0]}: ` +
+        result.reason.message
       );
     }
   });
 
+  // Spielprotokolle nur für die 24 stärksten
+  // NHL-Kandidaten laden.
+  const selected = [...picks]
+    .sort((a, b) => b.probability - a.probability)
+    .slice(0, 24);
+
+  const logs = await Promise.allSettled(
+    selected.map(pick =>
+      loadNhlPlayerLog(
+        pick.playerId,
+        season,
+        2
+      )
+    )
+  );
+
+  logs.forEach((result, index) => {
+    if (result.status !== 'fulfilled') {
+      return;
+    }
+
+    const pick = selected[index];
+
+    const previousGames = result.value
+      .filter(game => {
+        const gameDate = game.gameDate;
+
+        return (
+          typeof gameDate === 'string' &&
+          gameDate < date
+        );
+      })
+      .sort((a, b) =>
+        b.gameDate.localeCompare(a.gameDate)
+      )
+      .slice(0, 5);
+
+    const formGames = previousGames
+      .filter(g =>
+        Number.isFinite(Number(g.goals))
+      )
+      .map(g => ({
+        date: g.gameDate,
+        goals: Number(g.goals)
+      }));
+
+    pick.formGames = formGames;
+
+    pick.form = formGames.length
+      ? formGames.reduce(
+          (sum, g) => sum + g.goals,
+          0
+        )
+      : null;
+
+    const minutes = previousGames
+      .map(g => parseIceTime(g.toi))
+      .filter(Number.isFinite);
+
+    if (minutes.length) {
+      pick.minutes = Math.round(
+        minutes.reduce(
+          (sum, value) => sum + value,
+          0
+        ) / minutes.length
+      );
+    }
+  });
+
+  return { games, picks };
+}
+
+// ---------------------------------------
+// DEL
+// ---------------------------------------
+
+async function loadDel(date, key, errors) {
+  const leagues = await apiSports(
+    H,
+    key,
+    '/leagues'
+  );
+
+  const del = leagues.find(
+    league =>
+      (league.name || '').trim().toUpperCase() ===
+      'DEL'
+  );
+
+  if (!del) {
+    errors.push('DEL-Liga nicht gefunden');
+    return { games: [], picks: [] };
+  }
+
+  const raw = await apiSports(
+    H,
+    key,
+    `/games?date=${date}` +
+    `&league=${del.id}` +
+    `&season=${seasonStart(date)}`
+  );
+
+  const games = raw
+    .map(g => normalizeGame(g, 'Eishockey'))
+    .filter(g => sameDay(g.time, date))
+    .filter(upcoming);
+
   return {
     games,
-    picks:[]
+    picks: []
   };
 }
 
-export async function GET(req){
-  const today=berlin(new Date());
+// ---------------------------------------
+// HAUPT-API
+// ---------------------------------------
 
-  const date=
-    new URL(req.url)
-      .searchParams.get('date')||
+export async function GET(request) {
+  const today = berlinDate(new Date());
+
+  const date =
+    new URL(request.url).searchParams.get('date') ||
     today;
 
-  if(
-    !/^\d{4}-\d{2}-\d{2}$/.test(date)||
-    Number.isNaN(Date.parse(date))||
-    date<today||
-    date>shift(today,7)
-  ){
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+    Number.isNaN(Date.parse(date)) ||
+    date < today ||
+    date > shift(today, 7)
+  ) {
     return NextResponse.json(
       {
         error:
-          'Datum außerhalb der nächsten sieben Tage'
+          'Bitte ein Datum innerhalb der nächsten ' +
+          'sieben Tage auswählen.'
       },
-      {
-        status:400
-      }
+      { status: 400 }
     );
   }
 
-  const errors=[];
-  const games=[];
-  const picks=[];
-  const tasks=[];
+  const errors = [];
+  const games = [];
+  const picks = [];
+  const tasks = [];
 
-  const fk=
+  const footballKey =
     process.env.APISPORTS_FOOTBALL_KEY;
 
-  const hk=
+  const hockeyKey =
     process.env.APISPORTS_HOCKEY_KEY;
 
-  if(fk){
+  if (footballKey) {
     tasks.push(
-      football(date,fk,errors)
-        .then(r=>{
-          games.push(...r.games);
-          picks.push(...r.picks);
+      loadFootball(date, footballKey, errors)
+        .then(result => {
+          games.push(...result.games);
+          picks.push(...result.picks);
         })
-        .catch(e=>
+        .catch(error => {
           errors.push(
-            'Fußball: '+e.message
-          )
-        )
+            'Fußball: ' + error.message
+          );
+        })
     );
-  }else{
-    errors.push(
-      'Football-API-Key fehlt'
-    );
+  } else {
+    errors.push('Football-API-Key fehlt');
   }
 
-  if(hk){
+  // NHL: öffentliche NHL-Datenquelle.
+  tasks.push(
+    loadNhl(date, errors)
+      .then(result => {
+        games.push(...result.games);
+        picks.push(...result.picks);
+      })
+      .catch(error => {
+        errors.push(
+          'NHL: ' + error.message
+        );
+      })
+  );
+
+  // DEL: bisherige API-SPORTS-Anbindung.
+  if (hockeyKey) {
     tasks.push(
-      hockey(date,hk,errors)
-        .then(r=>{
-          games.push(...r.games);
-          picks.push(...r.picks);
+      loadDel(date, hockeyKey, errors)
+        .then(result => {
+          games.push(...result.games);
+          picks.push(...result.picks);
         })
-        .catch(e=>
+        .catch(error => {
           errors.push(
-            'Hockey: '+e.message
-          )
-        )
+            'DEL: ' + error.message
+          );
+        })
     );
-  }else{
-    errors.push(
-      'Hockey-API-Key fehlt'
-    );
+  } else {
+    errors.push('Hockey-API-Key fehlt');
   }
 
   await Promise.all(tasks);
 
   games.sort(
-    (a,b)=>
-      new Date(a.time)-
-      new Date(b.time)
+    (a, b) =>
+      new Date(a.time) - new Date(b.time)
   );
 
   picks.sort(
-    (a,b)=>
-      b.probability-
-      a.probability
+    (a, b) =>
+      b.probability - a.probability
   );
 
   return NextResponse.json(
@@ -499,16 +874,16 @@ export async function GET(req){
       picks,
       errors,
       notice:
-        'Fußball: unkalibrierte Modellschätzungen; '+
-        'Form nur bei verfügbaren Spielerdaten. '+
-        'Hockey: noch keine verifizierte '+
-        'individuelle Spieler-Datenquelle.',
-      updatedAt:
-        new Date().toISOString()
+        'NHL und Fußball: unkalibrierte ' +
+        'Poisson-Modellschätzungen aus echten ' +
+        'Saisonstatistiken. Formdaten werden ' +
+        'nur angezeigt, wenn sie verfügbar sind. ' +
+        'DEL-Spielerstatistiken folgen.',
+      updatedAt: new Date().toISOString()
     },
     {
-      headers:{
-        'Cache-Control':'no-store'
+      headers: {
+        'Cache-Control': 'no-store'
       }
     }
   );
