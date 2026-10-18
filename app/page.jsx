@@ -71,7 +71,8 @@ const shortDate = d => {
 };
 
 // =====================================
-// KOMBI-OPTIMIERER 3.0
+// KOMBI-OPTIMIERER 3.1
+// MAXIMAL EIN SPIELER PRO PARTIE
 // =====================================
 
 function buildCombo(picks, count) {
@@ -79,84 +80,54 @@ function buildCombo(picks, count) {
     p =>
       Number.isFinite(p.probability) &&
       p.probability > 0 &&
-      p.probability < 1
+      p.probability < 1 &&
+      p.fixtureId !== null &&
+      p.fixtureId !== undefined
   );
 
-  const chosen = [];
-  const usedGames = new Set();
-  const usedPlayers = new Set();
+  const bestByGame = new Map();
 
-  while (chosen.length < count) {
-    let best = null;
-    let bestScore = -Infinity;
+  for (const p of eligible) {
+    const gameKey = `${p.sport}-${p.fixtureId}`;
 
-    for (const p of eligible) {
-      const playerKey =
-        `${p.sport}-${p.playerId || p.id}`;
+    const qualityFactor =
+      p.dataQuality === 'hoch'
+        ? 1
+        : p.dataQuality === 'mittel'
+          ? 0.96
+          : 0.87;
 
-      if (usedPlayers.has(playerKey)) continue;
+    const experienceFactor =
+      Number(p.appearances) >= 15
+        ? 1
+        : 0.93;
 
-      const gameKey =
-        `${p.sport}-${p.fixtureId}`;
+    const score =
+      p.probability *
+      qualityFactor *
+      experienceFactor;
 
-      const sameGame = usedGames.has(gameKey);
+    const previous = bestByGame.get(gameKey);
 
-      const qualityFactor =
-        p.dataQuality === 'hoch'
-          ? 1
-          : p.dataQuality === 'mittel'
-            ? 0.96
-            : 0.87;
-
-      const experienceFactor =
-        Number(p.appearances) >= 15
-          ? 1
-          : 0.93;
-
-      const gameFactor =
-        sameGame ? 0.65 : 1;
-
-      const score =
-        p.probability *
-        qualityFactor *
-        experienceFactor *
-        gameFactor;
-
-      if (score > bestScore) {
-        best = p;
-        bestScore = score;
-      }
+    if (!previous || score > previous.score) {
+      bestByGame.set(gameKey, {
+        player: p,
+        score
+      });
     }
-
-    if (!best) break;
-
-    chosen.push(best);
-
-    usedPlayers.add(
-      `${best.sport}-${best.playerId || best.id}`
-    );
-
-    usedGames.add(
-      `${best.sport}-${best.fixtureId}`
-    );
   }
 
-  const distinctGames = new Set(
-    chosen.map(
-      p => `${p.sport}-${p.fixtureId}`
-    )
-  ).size;
+  const ranked = [...bestByGame.values()]
+    .sort((a, b) => b.score - a.score);
 
-  const theoreticalProduct = chosen.reduce(
-    (result, p) =>
-      result * p.probability,
-    1
-  );
+  const chosen = ranked
+    .slice(0, count)
+    .map(entry => entry.player);
 
   return {
     chosen,
-    distinctGames,
-    theoreticalProduct,
+    distinctGames: chosen.length,
+    availableGames: ranked.length,
     complete: chosen.length === count
   };
 }
@@ -229,9 +200,7 @@ function Player({ p, rank }) {
         <div className="prob">
           <strong>
             {Number.isFinite(p.probability)
-              ? Math.round(
-                  p.probability * 100
-                ) + '%'
+              ? Math.round(p.probability * 100) + '%'
               : '–'}
           </strong>
 
@@ -286,9 +255,7 @@ function Player({ p, rank }) {
                 }}
               >
                 {g.goals}
-                {g.goals === 1
-                  ? ' Tor'
-                  : ' Tore'}
+                {g.goals === 1 ? ' Tor' : ' Tore'}
               </div>
 
               <div
@@ -331,9 +298,7 @@ function Empty({ message }) {
     <div className="empty">
       <ShieldCheck size={30} />
 
-      <b>
-        Keine verfügbaren Spielerprognosen
-      </b>
+      <b>Keine verfügbaren Spielerprognosen</b>
 
       <p>{message}</p>
     </div>
@@ -348,7 +313,6 @@ export default function Home() {
   const [tab, setTab] = useState('Eishockey');
   const [page, setPage] = useState('Home');
   const [count, setCount] = useState(6);
-
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -361,8 +325,7 @@ export default function Home() {
 
     try {
       const response = await fetch(
-        '/api/picks?date=' +
-          encodeURIComponent(date),
+        '/api/picks?date=' + encodeURIComponent(date),
         { cache: 'no-store' }
       );
 
@@ -370,8 +333,7 @@ export default function Home() {
 
       if (!response.ok) {
         throw Error(
-          json.error ||
-          'Server antwortet nicht'
+          json.error || 'Server antwortet nicht'
         );
       }
 
@@ -381,11 +343,9 @@ export default function Home() {
         games: [],
         picks: [],
         errors: [
-          error.message ||
-          'Verbindung fehlgeschlagen'
+          error.message || 'Verbindung fehlgeschlagen'
         ],
-        notice:
-          'Verbindung nicht verfügbar.'
+        notice: 'Verbindung nicht verfügbar.'
       });
     } finally {
       setLoading(false);
@@ -399,9 +359,7 @@ export default function Home() {
   const games = useMemo(
     () =>
       (data?.games || []).filter(
-        g =>
-          tab === 'Gemischt' ||
-          g.sport === tab
+        g => tab === 'Gemischt' || g.sport === tab
       ),
     [data, tab]
   );
@@ -410,19 +368,14 @@ export default function Home() {
     () =>
       (data?.picks || [])
         .filter(
-          p =>
-            tab === 'Gemischt' ||
-            p.sport === tab
+          p => tab === 'Gemischt' || p.sport === tab
         )
         .sort(
-          (a, b) =>
-            b.probability -
-            a.probability
+          (a, b) => b.probability - a.probability
         ),
     [data, tab]
   );
 
-  // Verbesserte Kombi-Auswahl
   const combo = useMemo(
     () => buildCombo(picks, count),
     [picks, count]
@@ -450,11 +403,7 @@ export default function Home() {
             <h1>
               GoalPulse <em>PRO</em>
             </h1>
-
-            <p>
-              Torschützen-Analysen
-              nach Spieltag
-            </p>
+            <p>Torschützen-Analysen nach Spieltag</p>
           </div>
         </div>
 
@@ -465,65 +414,46 @@ export default function Home() {
             <select
               aria-label="Spieltag wählen"
               value={date}
-              onChange={e =>
-                setDate(e.target.value)
-              }
+              onChange={e => setDate(e.target.value)}
             >
-              <option
-                value={isoDE(new Date())}
-              >
+              <option value={isoDE(new Date())}>
                 Heute
               </option>
 
               <option
-                value={shift(
-                  isoDE(new Date()),
-                  1
-                )}
+                value={shift(isoDE(new Date()), 1)}
               >
                 Morgen
               </option>
 
-              {Array.from(
-                { length: 6 },
-                (_, i) => {
-                  const d = shift(
-                    isoDE(new Date()),
-                    i + 2
-                  );
+              {Array.from({ length: 6 }, (_, i) => {
+                const d = shift(
+                  isoDE(new Date()),
+                  i + 2
+                );
 
-                  return (
-                    <option
-                      key={d}
-                      value={d}
-                    >
-                      {new Date(
-                        d + 'T12:00:00Z'
-                      ).toLocaleDateString(
-                        'de-DE',
-                        {
-                          day: '2-digit',
-                          month: '2-digit',
-                          year: 'numeric'
-                        }
-                      )}
-                    </option>
-                  );
-                }
-              )}
+                return (
+                  <option key={d} value={d}>
+                    {new Date(
+                      d + 'T12:00:00Z'
+                    ).toLocaleDateString('de-DE', {
+                      day: '2-digit',
+                      month: '2-digit',
+                      year: 'numeric'
+                    })}
+                  </option>
+                );
+              })}
             </select>
 
             <strong>
               {new Date(
                 date + 'T12:00:00Z'
-              ).toLocaleDateString(
-                'de-DE',
-                {
-                  day: '2-digit',
-                  month: 'long',
-                  year: 'numeric'
-                }
-              )}
+              ).toLocaleDateString('de-DE', {
+                day: '2-digit',
+                month: 'long',
+                year: 'numeric'
+              })}
             </strong>
           </span>
         </div>
@@ -535,13 +465,9 @@ export default function Home() {
             key={t.name}
             className={
               'tab ' +
-              (tab === t.name
-                ? 'active'
-                : '')
+              (tab === t.name ? 'active' : '')
             }
-            onClick={() =>
-              setTab(t.name)
-            }
+            onClick={() => setTab(t.name)}
           >
             <span className="tabicon">
               {t.icon}
@@ -559,17 +485,13 @@ export default function Home() {
         <div>
           <span>🏟️</span>
           <b>{games.length}</b>
-          <small>
-            Spiele am Spieltag
-          </small>
+          <small>Spiele am Spieltag</small>
         </div>
 
         <div>
           <Target size={20} />
           <b>{picks.length}</b>
-          <small>
-            Spieler analysiert
-          </small>
+          <small>Spieler analysiert</small>
         </div>
 
         <div>
@@ -579,18 +501,12 @@ export default function Home() {
               ? clock(data.updatedAt)
               : '–'}
           </b>
-          <small>
-            Letztes Update
-          </small>
+          <small>Letztes Update</small>
         </div>
 
         <div>
           <Activity size={20} />
-          <b>
-            {loading
-              ? 'Lädt'
-              : 'API'}
-          </b>
+          <b>{loading ? 'Lädt' : 'API'}</b>
           <small>
             {data?.errors?.length
               ? 'Prüfung nötig'
@@ -602,10 +518,7 @@ export default function Home() {
       {data?.errors?.length > 0 && (
         <div className="warning">
           <AlertCircle size={18} />
-
-          <span>
-            {data.errors.join(' · ')}
-          </span>
+          <span>{data.errors.join(' · ')}</span>
         </div>
       )}
 
@@ -617,16 +530,16 @@ export default function Home() {
                 <Trophy size={23} />
                 Top-Torschützen
               </h2>
-
               <p>
-                Modellschätzungen für
-                den ausgewählten Spieltag
+                Modellschätzungen für den
+                ausgewählten Spieltag
               </p>
             </div>
 
             <button
               className="tiny"
               onClick={load}
+              aria-label="Daten aktualisieren"
             >
               <RefreshCw size={16} />
             </button>
@@ -651,20 +564,14 @@ export default function Home() {
 
           <div className="combo">
             <div>
-              <b>
-                Kombi-Generator 3.0
-              </b>
-
+              <b>Kombi-Generator 3.1</b>
               <small>
-                6–10 Spieler ·
-                Qualitätsfilter aktiv
+                6–10 Spieler · maximal einer pro Spiel
               </small>
             </div>
 
             <button
-              onClick={() =>
-                setPage('Kombis')
-              }
+              onClick={() => setPage('Kombis')}
             >
               Öffnen
               <ChevronRight size={17} />
@@ -679,13 +586,10 @@ export default function Home() {
             <div>
               <h2>
                 <Layers size={23} />
-                Kombi-Generator 3.0
+                Kombi-Generator 3.1
               </h2>
-
               <p>
-                Optimierte Auswahl nach
-                Datenqualität und
-                Spielverteilung
+                Maximal ein Torschütze pro Partie
               </p>
             </div>
           </div>
@@ -703,9 +607,7 @@ export default function Home() {
               max="10"
               value={count}
               onChange={e =>
-                setCount(
-                  Number(e.target.value)
-                )
+                setCount(Number(e.target.value))
               }
             />
 
@@ -717,63 +619,55 @@ export default function Home() {
               }}
             >
               <div>
-                <b>
-                  Ausgewählte Spieler:
-                  {' '}
-                </b>
-
-                {candidates.length}
-                {' von '}
-                {count}
+                <b>Ausgewählte Spieler: </b>
+                {candidates.length} von {count}
               </div>
 
               <div>
-                <b>
-                  Unterschiedliche Spiele:
-                  {' '}
-                </b>
-
+                <b>Unterschiedliche Spiele: </b>
                 {combo.distinctGames}
               </div>
 
               <div>
-                <b>
-                  Auswahlstrategie:
-                  {' '}
-                </b>
-
-                Qualitätsfilter +
-                Spielverteilung
+                <b>Auswahlstrategie: </b>
+                Qualitätsfilter + ein Spieler pro Spiel
               </div>
 
-              {combo.distinctGames <
-                candidates.length && (
-                <p className="muted">
-                  Einige Spieler stammen
-                  aus derselben Partie.
-                  Ihre Torereignisse können
-                  voneinander abhängen.
+              <p className="muted">
+                Maximal ein Torschütze pro Partie.
+                Die Auswahl bevorzugt Spieler mit
+                höheren Modellschätzungen und
+                besserer Datenqualität.
+              </p>
+
+              {!combo.complete && (
+                <p
+                  style={{
+                    color: '#b45309',
+                    fontWeight: 600,
+                    fontSize: 13
+                  }}
+                >
+                  Für {count} Spieler stehen nur{' '}
+                  {combo.availableGames}{' '}
+                  unterschiedliche Partien mit
+                  geeigneten Torschützen zur
+                  Verfügung.
                 </p>
               )}
 
               <p className="muted">
-                Die Auswahl berücksichtigt
-                Modellschätzung,
-                Datenqualität,
-                Saisonerfahrung und
-                unterschiedliche Spiele.
-                Die Prozentwerte sind
-                nicht historisch
-                kalibriert. Deshalb
-                wird keine verlässliche
-                Kombi-Wahrscheinlichkeit
-                angegeben.
+                Die Prozentwerte sind nicht
+                historisch kalibriert.
+                Eine verlässliche
+                Kombi-Wahrscheinlichkeit kann
+                deshalb nicht angegeben werden.
                 Keine Gewinngarantie.
               </p>
             </div>
           </div>
 
-          {combo.complete ? (
+          {candidates.length > 0 ? (
             candidates.map((p, i) => (
               <Player
                 key={p.id || i}
@@ -784,9 +678,8 @@ export default function Home() {
           ) : (
             <Empty
               message={
-                `Für ${count} Tipps stehen ` +
-                `nicht genügend geeignete ` +
-                `Spieler zur Verfügung.`
+                'Für diesen Spieltag stehen keine ' +
+                'geeigneten Torschützen zur Verfügung.'
               }
             />
           )}
@@ -801,16 +694,15 @@ export default function Home() {
                 <Calendar size={23} />
                 Spiele am Spieltag
               </h2>
-
               <p>
-                Spielzeiten in
-                deutscher Zeitzone
+                Spielzeiten in deutscher Zeitzone
               </p>
             </div>
 
             <button
               className="tiny"
               onClick={load}
+              aria-label="Spiele aktualisieren"
             >
               <RefreshCw size={16} />
             </button>
@@ -820,21 +712,14 @@ export default function Home() {
             games.map((g, i) => (
               <div
                 className="fixture"
-                key={
-                  `${g.sport}-${g.id}-${i}`
-                }
+                key={`${g.sport}-${g.id}-${i}`}
               >
                 <div>
                   <b>
-                    {g.home}
-                    {' – '}
-                    {g.away}
+                    {g.home} – {g.away}
                   </b>
-
                   <small>
-                    {g.league}
-                    {' · '}
-                    {g.sport}
+                    {g.league} · {g.sport}
                   </small>
                 </div>
 
@@ -863,15 +748,12 @@ export default function Home() {
 
       {page === 'Infos' && (
         <div className="panel info">
-          <h2>
-            Über GoalPulse
-          </h2>
+          <h2>Über GoalPulse</h2>
 
           <p>
-            NHL-Spielerstatistiken und
-            Fotos werden über die
-            öffentliche NHL-Datenquelle
-            geladen.
+            NHL-Spielerstatistiken und Fotos
+            werden über die öffentliche
+            NHL-Datenquelle geladen.
           </p>
 
           <p>
@@ -882,34 +764,30 @@ export default function Home() {
           </p>
 
           <p>
-            GoalPulse Analyse 2.0
-            verwendet geglättete
-            Saisonstatistiken und
-            berücksichtigt bei NHL
-            zusätzlich Schüsse und Form,
-            soweit Daten vorhanden sind.
+            GoalPulse Analyse 2.0 verwendet
+            geglättete Saisonstatistiken und
+            berücksichtigt bei NHL zusätzlich
+            Schüsse und Form, soweit Daten
+            vorhanden sind.
           </p>
 
           <p>
-            Der Kombi-Generator 3.0
-            bevorzugt unterschiedliche
-            Spiele und berücksichtigt
-            die Qualität der verfügbaren
-            Daten.
+            Der Kombi-Generator 3.1 wählt
+            maximal einen Torschützen pro
+            Partie aus und berücksichtigt
+            die Qualität der verfügbaren Daten.
           </p>
 
           <p>
             Alle Prozentwerte sind
-            unkalibrierte
-            Modellschätzungen,
+            unkalibrierte Modellschätzungen,
             keine bestätigten
             Torwahrscheinlichkeiten.
           </p>
 
           <p>
-            Die Form zeigt Tore aus
-            bis zu fünf verfügbaren
-            Spielen.
+            Die Form zeigt Tore aus bis
+            zu fünf verfügbaren Spielen.
           </p>
         </div>
       )}
@@ -921,13 +799,9 @@ export default function Home() {
           <button
             key={name}
             className={
-              page === name
-                ? 'current'
-                : ''
+              page === name ? 'current' : ''
             }
-            onClick={() =>
-              setPage(name)
-            }
+            onClick={() => setPage(name)}
           >
             <Icon size={22} />
             <span>{name}</span>
