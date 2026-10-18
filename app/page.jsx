@@ -2,1304 +2,161 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import {
-  Target, CalendarDays, Layers, Activity, RefreshCw,
-  Trophy, House, Calendar, Star, Info, ChevronRight,
-  ShieldCheck, AlertCircle, Clock3
-} from 'lucide-react';
+import { Target, RefreshCw, Layers, CalendarDays, AlertCircle, House, Calendar, Info, Activity } from 'lucide-react';
 
-const tabs = [
-  { name: 'Eishockey', icon: '🏒', sub: 'NHL & DEL' },
-  { name: 'Fußball', icon: '⚽', sub: '11 Wettbewerbe' },
-  { name: 'Gemischt', icon: '◈', sub: 'Beide Sportarten' }
-];
+const berlinDate = d => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+function shift(d, n) { const x = new Date(`${d}T12:00:00Z`); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
+function clock(s) { try { return new Intl.DateTimeFormat('de-DE', { timeZone: 'Europe/Berlin', hour: '2-digit', minute: '2-digit' }).format(new Date(s)); } catch { return '–'; } }
+const keyGame = x => `${x.sport}-${x.fixtureId}`;
+const quality = x => x.dataQuality === 'hoch' ? 1 : x.dataQuality === 'mittel' ? 0.96 : 0.88;
+const rank = x => x.probability * quality(x);
+const valid = x => Number.isFinite(x.probability) && x.probability > 0 && x.probability < 1 && x.fixtureId != null;
 
-const isoDE = d => new Intl.DateTimeFormat('en-CA', {
-  timeZone: 'Europe/Berlin',
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit'
-}).format(d);
-
-const shift = (date, n) => {
-  const d = new Date(`${date}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-};
-
-const clock = d => {
-  try {
-    return d
-      ? new Intl.DateTimeFormat('de-DE', {
-          timeZone: 'Europe/Berlin',
-          hour: '2-digit',
-          minute: '2-digit'
-        }).format(new Date(d))
-      : '–';
-  } catch {
-    return '–';
+// Bis zu vier unterschiedliche Marktarten pro Partie.
+// Eine Marktart pro Partie verhindert widerspruechliche Tipps
+// (z.B. Heim- und Auswaertssieg oder mehrere Over-Linien).
+const MAX_PER_GAME = 4;
+function canAddMarket(m, chosen) {
+  const same = chosen.filter(x => keyGame(x) === keyGame(m));
+  return same.length < MAX_PER_GAME &&
+    !same.some(x => category(x) === category(m));
+}
+function autoCombo(markets, count, strategy) {
+  const eligible = markets.filter(valid).sort((a, b) => rank(b) - rank(a));
+  const result = [];
+  while (result.length < count) {
+    const possible = eligible.filter(m => !result.some(x => x.id === m.id) && canAddMarket(m, result));
+    if (!possible.length) break;
+    const chosenCategories = new Set(result.map(category));
+    possible.sort((a, b) => {
+      const aSame = result.filter(x => keyGame(x) === keyGame(a)).length;
+      const bSame = result.filter(x => keyGame(x) === keyGame(b)).length;
+      const aBonus = strategy === 'mix' && !chosenCategories.has(category(a)) ? 0.12 : 0;
+      const bBonus = strategy === 'mix' && !chosenCategories.has(category(b)) ? 0.12 : 0;
+      // Leichte Diversifikation, keine Aenderung der angezeigten Wahrscheinlichkeiten.
+      return (rank(b) + bBonus - bSame * 0.025) - (rank(a) + aBonus - aSame * 0.025);
+    });
+    result.push(possible[0]);
   }
-};
-
-const shortDate = d => {
-  try {
-    return d
-      ? new Date(
-          d.length === 10 ? `${d}T12:00:00Z` : d
-        ).toLocaleDateString('de-DE', {
-          day: '2-digit',
-          month: '2-digit',
-          timeZone: 'Europe/Berlin'
-        })
-      : '–';
-  } catch {
-    return '–';
-  }
-};
-
-const gameKey = p => `${p.sport}-${p.fixtureId}`;
-const playerKey = p =>
-  String(p.id || `${gameKey(p)}-${p.playerId}`);
-
-const eligible = p =>
-  Number.isFinite(p.probability) &&
-  p.probability > 0 &&
-  p.probability < 1 &&
-  p.fixtureId != null;
-
-const qualityWeight = p =>
-  p.dataQuality === 'hoch'
-    ? 1
-    : p.dataQuality === 'mittel'
-      ? 0.96
-      : 0.87;
-
-const score = p =>
-  p.probability *
-  qualityWeight(p) *
-  (Number(p.appearances) >= 15 ? 1 : 0.93);
-
-function buildCombo(picks, count) {
-  const byGame = new Map();
-
-  for (const p of picks.filter(eligible)) {
-    const key = gameKey(p);
-
-    if (
-      !byGame.has(key) ||
-      score(p) > score(byGame.get(key))
-    ) {
-      byGame.set(key, p);
-    }
-  }
-
-  const ranked = [...byGame.values()].sort(
-    (a, b) => score(b) - score(a)
-  );
-
-  const chosen = ranked.slice(0, count);
-
-  return {
-    chosen,
-    availableGames: ranked.length,
-    complete: chosen.length === count
-  };
+  return result;
 }
-
-function Avatar({ photo, name }) {
-  const [broken, setBroken] = useState(false);
-
-  useEffect(() => {
-    setBroken(false);
-  }, [photo]);
-
-  return (
-    <div className="avatar">
-      {photo && !broken ? (
-        <img
-          src={photo}
-          alt={name}
-          loading="lazy"
-          referrerPolicy="no-referrer"
-          onError={() => setBroken(true)}
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            borderRadius: '50%'
-          }}
-        />
-      ) : (
-        '👤'
-      )}
-    </div>
-  );
+function category(x) {
+  if (x.market === 'scorer') return 'scorer';
+  if (x.market?.startsWith('over-')) return 'over';
+  if (x.market === 'btts-yes' || x.market === 'btts-no') return 'btts';
+  return 'win';
 }
-
-function Player({
-  p,
-  rank,
-  action,
-  selected,
-  disabled
-}) {
-  return (
-    <div className="player">
-      <div className="playerhead">
-        <span className="rank">{rank}</span>
-
-        <Avatar photo={p.photo} name={p.name} />
-
-        <div className="person">
-          <b>{p.name}</b>
-          <small>
-            {p.team || 'Team nicht verfügbar'} · {p.league}
-          </small>
-          <small>
-            {p.opponent || 'Gegner nicht verfügbar'} ·{' '}
-            {clock(p.time)} Uhr
-          </small>
-        </div>
-
-        <div className="prob">
-          <strong>
-            {Number.isFinite(p.probability)
-              ? `${Math.round(p.probability * 100)}%`
-              : '–'}
-          </strong>
-          <small>Schätzung</small>
-        </div>
-      </div>
-
-      <div className="stats">
-        <span>
-          Schüsse Saison
-          <b>{p.shots ?? '–'}</b>
-        </span>
-        <span>
-          Tore letzte 5
-          <b>{p.form ?? '–'}</b>
-        </span>
-        <span>
-          Ø Minuten
-          <b>{p.minutes ?? '–'}</b>
-        </span>
-      </div>
-
-      {p.formShots != null && (
-        <p
-          className="muted"
-          style={{ fontSize: 12, margin: '9px 0 0' }}
-        >
-          Schüsse letzte 5 Spiele: <b>{p.formShots}</b>
-        </p>
-      )}
-
-      {p.formGames?.length > 0 && (
-        <div
-          style={{
-            display: 'flex',
-            gap: 6,
-            marginTop: 12,
-            flexWrap: 'wrap'
-          }}
-        >
-          {p.formGames.map((g, i) => (
-            <div
-              key={i}
-              style={{
-                flex: '1 1 54px',
-                minWidth: 54,
-                padding: '8px 5px',
-                borderRadius: 10,
-                background: g.goals ? '#dff9ec' : '#f0f3f6',
-                textAlign: 'center'
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 13,
-                  fontWeight: 700
-                }}
-              >
-                {g.goals}
-                {g.goals === 1 ? ' Tor' : ' Tore'}
-              </div>
-
-              <div
-                style={{
-                  marginTop: 3,
-                  fontSize: 10,
-                  color: '#64748b'
-                }}
-              >
-                {shortDate(g.date)}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <p
-        className="muted"
-        style={{ fontSize: 11, margin: '10px 0 0' }}
-      >
-        {p.model || 'Unkalibriertes Prognosemodell'}
-        {' · '}
-        Datenqualität: {p.dataQuality || 'unbekannt'}
-        {' · '}
-        {p.lineupConfirmed
-          ? 'Aufstellung bestätigt'
-          : 'Aufstellung nicht bestätigt'}
-      </p>
-
-      {action && (
-        <button
-          type="button"
-          disabled={disabled && !selected}
-          onClick={() => action(p)}
-          style={{
-            marginTop: 10,
-            padding: '9px 14px',
-            borderRadius: 10,
-            border: '1px solid #cbd5e1',
-            background: selected ? '#e2e8f0' : '#e0f2fe',
-            color: '#0f172a',
-            fontWeight: 700,
-            opacity: disabled && !selected ? 0.45 : 1
-          }}
-        >
-          {selected ? '− Entfernen' : '+ Auswählen'}
-        </button>
-      )}
-    </div>
-  );
-}
-
-function Empty({ message }) {
-  return (
-    <div className="empty">
-      <ShieldCheck size={30} />
-      <b>Keine verfügbaren Spielerprognosen</b>
-      <p>{message}</p>
-    </div>
-  );
-}
+function catName(x) { return { scorer: 'Torschütze', over: 'Über-Tore', btts: 'Beide treffen', win: 'Sieger / Ergebnis' }[category(x)]; }
 
 export default function Home() {
-  const [tab, setTab] = useState('Eishockey');
-  const [page, setPage] = useState('Home');
-
-  const [count, setCount] = useState(2);
-  const [mode, setMode] = useState('auto');
-  const [selectedIds, setSelectedIds] = useState([]);
-
-  const [rasterCount, setRasterCount] = useState(4);
-  const [rasterSelections, setRasterSelections] = useState([]);
-
+  const [date, setDate] = useState(() => berlinDate(new Date()));
+  const [sport, setSport] = useState('Gemischt');
+  const [page, setPage] = useState('Raster');
+  const [count, setCount] = useState(4);
+  const [strategy, setStrategy] = useState('mix');
+  const [scorersOnly, setScorersOnly] = useState(false);
+  const [manualIds, setManualIds] = useState([]);
   const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [date, setDate] = useState(() => isoDE(new Date()));
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [reload, setReload] = useState(0);
 
-  async function load() {
+  useEffect(() => {
+    let alive = true;
+    const controller = new AbortController();
     setLoading(true);
+    setError('');
+    fetch(`/api/picks?date=${encodeURIComponent(date)}`, { cache: 'no-store', signal: controller.signal })
+      .then(async r => { const json = await r.json(); if (!r.ok) throw Error(json.error || 'API-Fehler'); return json; })
+      .then(json => { if (alive) setData(json); })
+      .catch(e => { if (alive && e.name !== 'AbortError') { setError(e.message); setData(null); } })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; controller.abort(); };
+  }, [date, reload]);
 
-    try {
-      const response = await fetch(
-        `/api/picks?date=${encodeURIComponent(date)}`,
-        { cache: 'no-store' }
-      );
+  useEffect(() => { setManualIds([]); }, [date, sport]);
 
-      const json = await response.json();
+  const games = useMemo(() => (data?.games || []).filter(g => sport === 'Gemischt' || g.sport === sport), [data, sport]);
+  const picks = useMemo(() => (data?.picks || []).filter(p => sport === 'Gemischt' || p.sport === sport).sort((a, b) => rank(b) - rank(a)), [data, sport]);
+  const markets = useMemo(() => (data?.markets || []).filter(m => (sport === 'Gemischt' || m.sport === sport) && valid(m)), [data, sport]);
+  const automatic = useMemo(() => autoCombo(markets.filter(m => !scorersOnly || m.market === 'scorer'), count, strategy), [markets, count, strategy, scorersOnly]);
+  const byId = useMemo(() => new Map(markets.map(m => [m.id, m])), [markets]);
+  const manual = manualIds.map(id => byId.get(id)).filter(Boolean).slice(0, count);
+  const manualGames = new Set(manual.map(keyGame));
+  const [manualMode, setManualMode] = useState(false);
+  const combo = manualMode ? manual : automatic;
+  const comboComplete = combo.length === count;
+  const uniqueGames = new Set(markets.map(keyGame)).size;
+  const categories = ['Alle', 'Über-Tore', 'Sieger / Ergebnis', 'Beide treffen', 'Torschütze'];
+  const [categoryFilter, setCategoryFilter] = useState('Alle');
 
-      if (!response.ok) {
-        throw Error(json.error || 'Server antwortet nicht');
-      }
-
-      setData(json);
-    } catch (error) {
-      setData({
-        games: [],
-        picks: [],
-        errors: [
-          error.message || 'Verbindung fehlgeschlagen'
-        ],
-        notice: 'Verbindung nicht verfügbar.'
-      });
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    load();
-  }, [date]);
-
-  useEffect(() => {
-    setSelectedIds([]);
-    setRasterSelections([]);
-  }, [date, tab]);
-
-  const games = useMemo(
-    () =>
-      (data?.games || []).filter(
-        g => tab === 'Gemischt' || g.sport === tab
-      ),
-    [data, tab]
-  );
-
-  const picks = useMemo(
-    () =>
-      (data?.picks || [])
-        .filter(
-          p => tab === 'Gemischt' || p.sport === tab
-        )
-        .sort(
-          (a, b) => b.probability - a.probability
-        ),
-    [data, tab]
-  );
-
-  const combo = useMemo(
-    () => buildCombo(picks, count),
-    [picks, count]
-  );
-
-  const manualPicks = useMemo(() => {
-    const byId = new Map(
-      picks
-        .filter(eligible)
-        .map(p => [playerKey(p), p])
-    );
-
-    return selectedIds
-      .map(id => byId.get(id))
-      .filter(Boolean)
-      .slice(0, count);
-  }, [picks, selectedIds, count]);
-
-  const candidates =
-    mode === 'auto' ? combo.chosen : manualPicks;
-
-  const chosenIds = new Set(
-    manualPicks.map(playerKey)
-  );
-
-  const usedGames = new Set(
-    manualPicks.map(gameKey)
-  );
-
-  const availableManual = picks
-    .filter(eligible)
-    .sort((a, b) => score(b) - score(a));
-
-  const nav = [
-    ['Home', House],
-    ['Kombis', Layers],
-    ['Raster', Target],
-    ['Spiele', Calendar],
-    ['Favoriten', Star],
-    ['Infos', Info]
-  ];
-
-  // Alle auswählbaren Märkte
-  const rasterMarkets = useMemo(() => {
-    const list = [];
-
-    for (const g of games) {
-      const key = `${g.sport}-${g.id}`;
-      const hockey = g.sport === 'Eishockey';
-
-      const thresholds = hockey
-        ? [4.5, 5.5, 6.5]
-        : [1.5, 2.5, 3.5];
-
-      const add = (
-        market,
-        label,
-        player = null
-      ) => {
-        list.push({
-          id: `${key}-${market}`,
-          gameKey: key,
-          sport: g.sport,
-          game: `${g.home} – ${g.away}`,
-          league: g.league,
-          time: g.time,
-          label,
-          player,
-          probability: player?.probability ?? null
-        });
-      };
-
-      for (const threshold of thresholds) {
-        add(
-          `over-${threshold}`,
-          `Über ${String(threshold).replace('.', ',')} Tore`
-        );
-      }
-
-      add('home-win', `Sieg ${g.home}`);
-      add('away-win', `Sieg ${g.away}`);
-
-      add(
-        'btts-yes',
-        'Beide Teams treffen: Ja'
-      );
-
-      add(
-        'btts-no',
-        'Beide Teams treffen: Nein'
-      );
-
-      const gamePicks = picks.filter(
-        p =>
-          String(p.fixtureId) === String(g.id) &&
-          p.sport === g.sport &&
-          eligible(p)
-      );
-
-      for (const p of gamePicks) {
-        add(
-          `scorer-${p.playerId || p.id}`,
-          `Torschütze: ${p.name}`,
-          p
-        );
-      }
-    }
-
-    return list;
-  }, [games, picks]);
-
-  const selectedRaster = rasterSelections
-    .map(id => rasterMarkets.find(m => m.id === id))
-    .filter(Boolean)
-    .slice(0, rasterCount);
-
-  const rasterUsedGames = new Set(
-    selectedRaster.map(m => m.gameKey)
-  );
-
-  function toggleRaster(market) {
-    setRasterSelections(prev => {
-      if (prev.includes(market.id)) {
-        return prev.filter(id => id !== market.id);
-      }
-
-      const current = prev
-        .map(id => rasterMarkets.find(m => m.id === id))
-        .filter(Boolean);
-
-      if (
-        current.length >= rasterCount ||
-        current.some(
-          m => m.gameKey === market.gameKey
-        )
-      ) {
-        return prev;
-      }
-
-      return [...prev, market.id];
+  function toggleMarket(m) {
+    setManualIds(old => {
+      if (old.includes(m.id)) return old.filter(id => id !== m.id);
+      const current = old.map(id => byId.get(id)).filter(Boolean);
+      if (current.length >= count || !canAddMarket(m, current)) return old;
+      return [...old, m.id];
     });
   }
 
-  function togglePlayer(p) {
-    const id = playerKey(p);
-
-    if (selectedIds.includes(id)) {
-      setSelectedIds(prev =>
-        prev.filter(x => x !== id)
-      );
-      return;
-    }
-
-    if (
-      manualPicks.length >= count ||
-      usedGames.has(gameKey(p))
-    ) {
-      return;
-    }
-
-    setSelectedIds(prev => [...prev, id]);
-  }
-
   return (
-    <div className="shell">
-      <header>
-        <div className="brand">
-          <div className="logo">
-            <Target size={29} />
-          </div>
+    <div className="gp-shell">
+      <style>{`
+        .gp-shell{max-width:950px;margin:0 auto;padding:20px 15px 100px;color:#e8efff;font-family:system-ui,-apple-system,sans-serif}
+        body{background:#081323}.gp-top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
+        .gp-title{font-size:25px;font-weight:850;margin:0}.gp-sub{color:#9fb0c9;font-size:12px;margin:5px 0 0}
+        .gp-card{background:#11233b;border:1px solid #29405f;border-radius:16px;padding:16px;margin-top:13px}
+        .gp-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.gp-between{justify-content:space-between}
+        .gp-btn{border:1px solid #365173;background:#182f4c;color:#e8efff;border-radius:11px;padding:10px 13px;font-size:13px;font-weight:650;cursor:pointer}
+        .gp-btn:disabled{opacity:.36;cursor:not-allowed}.gp-btn.on{background:#1665c0;border-color:#56a3ff;color:#fff}
+        .gp-muted{color:#a4b5ce;font-size:12px;line-height:1.55}.gp-section{font-size:18px;font-weight:750;margin:23px 0 10px}
+        .gp-line{border-top:1px solid #2b405c;margin:13px 0}.gp-pct{font-size:22px;font-weight:850;color:#65dcb5}
+        .gp-market{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #253b58}
+        .gp-market:last-child{border:0}.gp-market b{font-size:14px}.gp-market small{display:block;color:#a4b5ce;font-size:11px;margin-top:5px}
+        .gp-nav{position:fixed;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:4px;background:#0b1a2e;border-top:1px solid #29405f;padding:10px 6px;z-index:20}
+        .gp-nav button{display:flex;flex-direction:column;align-items:center;gap:3px;min-width:65px}
+        .gp-select{background:#182f4c;color:#fff;border:1px solid #365173;padding:10px;border-radius:10px;max-width:100%}
+        .gp-warning{background:#473421;border:1px solid #896039;color:#ffe3ac;padding:12px;border-radius:12px;margin-top:12px;font-size:12px}
+        .gp-range{width:100%;accent-color:#58a8ff;margin:15px 0}
+      `}</style>
 
-          <div>
-            <h1>
-              GoalPulse <em>PRO</em>
-            </h1>
-            <p>Torschützen-Analysen nach Spieltag</p>
-          </div>
-        </div>
-
-        <div className="date">
-          <CalendarDays size={19} />
-
-          <span>
-            <select
-              aria-label="Spieltag wählen"
-              value={date}
-              onChange={e => setDate(e.target.value)}
-            >
-              <option value={isoDE(new Date())}>
-                Heute
-              </option>
-
-              <option value={shift(isoDE(new Date()), 1)}>
-                Morgen
-              </option>
-
-              {Array.from({ length: 6 }, (_, i) => {
-                const d = shift(
-                  isoDE(new Date()),
-                  i + 2
-                );
-
-                return (
-                  <option key={d} value={d}>
-                    {new Date(
-                      `${d}T12:00:00Z`
-                    ).toLocaleDateString('de-DE', {
-                      day: '2-digit',
-                      month: '2-digit',
-                      year: 'numeric'
-                    })}
-                  </option>
-                );
-              })}
-            </select>
-
-            <strong>
-              {new Date(
-                `${date}T12:00:00Z`
-              ).toLocaleDateString('de-DE', {
-                day: '2-digit',
-                month: 'long',
-                year: 'numeric'
-              })}
-            </strong>
-          </span>
-        </div>
-      </header>
-
-      <div className="tabs">
-        {tabs.map(t => (
-          <button
-            key={t.name}
-            className={`tab ${tab === t.name ? 'active' : ''}`}
-            onClick={() => setTab(t.name)}
-          >
-            <span className="tabicon">{t.icon}</span>
-
-            <span>
-              <b>{t.name}</b>
-              <small>{t.sub}</small>
-            </span>
-          </button>
-        ))}
+      <div className="gp-top">
+        <div><h1 className="gp-title">🎯 GoalPulse <span style={{color:'#65dcb5'}}>PRO</span></h1><p className="gp-sub">Analyse 4.0 · automatischer Multi-Markt-Raster</p></div>
+        <div className="gp-row"><CalendarDays size={18}/><select className="gp-select" value={date} onChange={e => setDate(e.target.value)}>{Array.from({length:8},(_,i)=>{const d=shift(berlinDate(new Date()),i);return <option key={d} value={d}>{i===0?'Heute':i===1?'Morgen':d}</option>;})}</select><button className="gp-btn" onClick={()=>setReload(n=>n+1)} title="Aktualisieren"><RefreshCw size={17}/></button></div>
       </div>
 
-      <section className="metrics">
-        <div>
-          <span>🏟️</span>
-          <b>{games.length}</b>
-          <small>Spiele am Spieltag</small>
+      <div className="gp-card"><div className="gp-row">{['Fußball','Eishockey','Gemischt'].map(s=><button key={s} className={`gp-btn ${sport===s?'on':''}`} onClick={()=>setSport(s)}>{s==='Fußball'?'⚽':s==='Eishockey'?'🏒':'🔀'} {s}</button>)}</div><p className="gp-muted">{games.length} Spiele · {picks.length} Torschützen · {markets.length} berechnete Märkte · {loading?'Analysiere …':'Daten geladen'}</p></div>
+      {error && <div className="gp-warning"><AlertCircle size={15}/> {error}</div>}
+      {data?.errors?.length>0 && <div className="gp-warning">{data.errors.join(' · ')}</div>}
+
+      {page==='Raster' && <>
+        <h2 className="gp-section">🧩 Automatische Kombis 2–10 · bis zu 4 pro Spiel</h2>
+        <div className="gp-card">
+          <div className="gp-row gp-between"><b>Anzahl Tipps</b><strong style={{fontSize:22}}>{count}</strong></div>
+          <input className="gp-range" type="range" min="2" max="10" value={count} onChange={e=>{const n=Number(e.target.value);setCount(n);setManualIds(x=>x.slice(0,n));}}/>
+          <div className="gp-row"><button className={`gp-btn ${!manualMode?'on':''}`} onClick={()=>setManualMode(false)}>⚡ Automatisch erstellen</button><button className={`gp-btn ${manualMode?'on':''}`} onClick={()=>setManualMode(true)}>✋ Manuell ändern</button></div>
+          {!manualMode && <><p className="gp-muted">Automatische Strategie:</p><div className="gp-row"><button className={`gp-btn ${strategy==='mix'?'on':''}`} onClick={()=>setStrategy('mix')}>Marktmix</button><button className={`gp-btn ${strategy==='best'?'on':''}`} onClick={()=>setStrategy('best')}>Höchste Schätzwerte</button></div><div className="gp-row" style={{marginTop:12}}><label className="gp-muted"><input type="checkbox" checked={scorersOnly} onChange={e=>setScorersOnly(e.target.checked)}/> Nur Torschützen</label></div></>}
+          <div className="gp-line"/>
+          <div className="gp-row gp-between"><b>Deine {manualMode?'manuelle':'automatische'} Kombi</b><span>{combo.length}/{count}</span></div>
+          {!comboComplete && <p className="gp-muted">Für eine vollständige Kombi fehlen {count-combo.length} passende Märkte. Bis zu vier verschiedene Marktarten pro Spiel sind möglich. Spiele mit Marktprognosen: {uniqueGames}.</p>}
+          {combo.length===0 && <p className="gp-muted">Noch keine berechneten Märkte vorhanden. Wähle einen anderen Spieltag oder prüfe die API-Hinweise.</p>}
+          {combo.map((m,i)=><div className="gp-market" key={m.id}><div><b>{i+1}. {m.label}</b><small>{m.game} · {m.sport} · {catName(m)}</small><small>Datenqualität: {m.dataQuality} · {m.model}</small></div><div style={{textAlign:'right'}}><div className="gp-pct">{Math.round(m.probability*100)}%</div>{manualMode && <button className="gp-btn" onClick={()=>toggleMarket(m)}>−</button>}</div></div>)}
+          {manualMode && <button className="gp-btn" onClick={()=>setManualIds([])} style={{marginTop:12}}>Auswahl löschen</button>}
+          <p className="gp-muted">Bis zu vier unterschiedliche Marktarten pro Spiel. Tipps aus demselben Spiel sind voneinander abhängig. Alle Prozentwerte sind unkalibrierte Modellschätzungen; keine sichere Kombi-Chance.</p>
         </div>
-
-        <div>
-          <Target size={20} />
-          <b>{picks.length}</b>
-          <small>Spieler analysiert</small>
-        </div>
-
-        <div>
-          <Clock3 size={20} />
-          <b>
-            {data?.updatedAt
-              ? clock(data.updatedAt)
-              : '–'}
-          </b>
-          <small>Letztes Update</small>
-        </div>
-
-        <div>
-          <Activity size={20} />
-          <b>{loading ? 'Lädt' : 'API'}</b>
-          <small>
-            {data?.errors?.length
-              ? 'Prüfung nötig'
-              : 'Verbunden'}
-          </small>
-        </div>
-      </section>
-
-      {data?.errors?.length > 0 && (
-        <div className="warning">
-          <AlertCircle size={18} />
-          <span>{data.errors.join(' · ')}</span>
-        </div>
-      )}
-
-      {page === 'Home' && (
-        <>
-          <div className="sectionhead">
-            <div>
-              <h2>
-                <Trophy size={23} />
-                Top-Torschützen
-              </h2>
-              <p>
-                Modellschätzungen für den ausgewählten
-                Spieltag
-              </p>
-            </div>
-
-            <button
-              className="tiny"
-              onClick={load}
-              aria-label="Aktualisieren"
-            >
-              <RefreshCw size={16} />
-            </button>
-          </div>
-
-          {picks.length ? (
-            picks.map((p, i) => (
-              <Player
-                key={playerKey(p)}
-                p={p}
-                rank={i + 1}
-              />
-            ))
-          ) : (
-            <Empty
-              message={
-                data?.notice ||
-                'Keine Spielerdaten verfügbar.'
-              }
-            />
-          )}
-
-          <div className="combo">
-            <div>
-              <b>Kombi-Generator 3.2</b>
-              <small>
-                2–10 Spieler · automatisch oder manuell
-              </small>
-            </div>
-
-            <button onClick={() => setPage('Kombis')}>
-              Öffnen
-              <ChevronRight size={17} />
-            </button>
-          </div>
-
-          <div className="combo">
-            <div>
-              <b>Multi-Markt-Kombi-Raster</b>
-              <small>
-                Über-Tore · Siege · Beide treffen · Torschützen
-              </small>
-            </div>
-
-            <button onClick={() => setPage('Raster')}>
-              Öffnen
-              <ChevronRight size={17} />
-            </button>
-          </div>
-        </>
-      )}
-
-      {page === 'Kombis' && (
-        <>
-          <div className="sectionhead">
-            <div>
-              <h2>
-                <Layers size={23} />
-                Kombi-Generator 3.2
-              </h2>
-              <p>
-                2–10 Spieler · maximal einer pro Partie
-              </p>
-            </div>
-          </div>
-
-          <div className="panel">
-            <label htmlFor="count">
-              Anzahl Spieler: <b>{count}</b>
-            </label>
-
-            <input
-              id="count"
-              type="range"
-              min="2"
-              max="10"
-              value={count}
-              onChange={e => {
-                const next = Number(e.target.value);
-                setCount(next);
-                setSelectedIds(prev =>
-                  prev.slice(0, next)
-                );
-              }}
-            />
-
-            <div
-              style={{
-                display: 'flex',
-                gap: 8,
-                marginTop: 15,
-                flexWrap: 'wrap'
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => setMode('auto')}
-                style={{
-                  padding: '10px 12px',
-                  borderRadius: 10,
-                  fontWeight: 700,
-                  border: '1px solid #cbd5e1',
-                  background:
-                    mode === 'auto'
-                      ? '#dbeafe'
-                      : '#fff'
-                }}
-              >
-                Automatisch
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setMode('manual')}
-                style={{
-                  padding: '10px 12px',
-                  borderRadius: 10,
-                  fontWeight: 700,
-                  border: '1px solid #cbd5e1',
-                  background:
-                    mode === 'manual'
-                      ? '#dbeafe'
-                      : '#fff'
-                }}
-              >
-                Selbst auswählen
-              </button>
-            </div>
-
-            <div
-              style={{
-                display: 'grid',
-                gap: 10,
-                marginTop: 16
-              }}
-            >
-              <div>
-                <b>Ausgewählte Spieler: </b>
-                {candidates.length} von {count}
-              </div>
-
-              <div>
-                <b>Unterschiedliche Spiele: </b>
-                {new Set(
-                  candidates.map(gameKey)
-                ).size}
-              </div>
-
-              <div>
-                <b>Modus: </b>
-                {mode === 'auto'
-                  ? 'Automatische Qualitätsauswahl'
-                  : 'Manuelle Spielerauswahl'}
-              </div>
-
-              {mode === 'auto' && !combo.complete && (
-                <p
-                  style={{
-                    color: '#b45309',
-                    fontWeight: 600,
-                    fontSize: 13
-                  }}
-                >
-                  Nur {combo.availableGames} unterschiedliche
-                  Spiele mit geeigneten Torschützen verfügbar.
-                </p>
-              )}
-
-              {mode === 'manual' && (
-                <>
-                  <p className="muted">
-                    Wähle unten Spieler aus.
-                    Ein zweiter Spieler derselben Partie
-                    ist gesperrt.
-                  </p>
-
-                  <button
-                    type="button"
-                    onClick={() => setSelectedIds([])}
-                    style={{
-                      padding: '9px 12px',
-                      borderRadius: 10,
-                      border: '1px solid #cbd5e1',
-                      background: '#fff',
-                      fontWeight: 700
-                    }}
-                  >
-                    Auswahl zurücksetzen
-                  </button>
-                </>
-              )}
-
-              <p className="muted">
-                Alle Prozentwerte sind unkalibrierte
-                Modellschätzungen. Keine verlässliche
-                Kombi-Wahrscheinlichkeit und keine
-                Gewinngarantie.
-              </p>
-            </div>
-          </div>
-
-          {candidates.length > 0 ? (
-            candidates.map((p, i) => (
-              <Player
-                key={playerKey(p)}
-                p={p}
-                rank={i + 1}
-                action={
-                  mode === 'manual'
-                    ? togglePlayer
-                    : null
-                }
-                selected={mode === 'manual'}
-              />
-            ))
-          ) : (
-            <Empty
-              message={
-                mode === 'manual'
-                  ? 'Wähle unten Spieler für deine Kombi aus.'
-                  : 'Keine geeigneten Torschützen verfügbar.'
-              }
-            />
-          )}
-
-          {mode === 'manual' && (
-            <>
-              <div className="sectionhead">
-                <div>
-                  <h2>
-                    <Target size={23} />
-                    Spieler auswählen
-                  </h2>
-                  <p>
-                    {manualPicks.length} von {count} ausgewählt
-                    · pro Spiel nur ein Spieler
-                  </p>
-                </div>
-              </div>
-
-              {availableManual
-                .filter(
-                  p => !chosenIds.has(playerKey(p))
-                )
-                .map((p, i) => (
-                  <Player
-                    key={playerKey(p)}
-                    p={p}
-                    rank={i + 1}
-                    action={togglePlayer}
-                    selected={false}
-                    disabled={
-                      manualPicks.length >= count ||
-                      usedGames.has(gameKey(p))
-                    }
-                  />
-                ))}
-            </>
-          )}
-        </>
-      )}
-
-      {page === 'Raster' && (
-        <>
-          <div className="sectionhead">
-            <div>
-              <h2>
-                <Target size={23} />
-                Multi-Markt-Kombi-Raster
-              </h2>
-              <p>
-                Fußball, Eishockey oder gemischt ·
-                Über-Tore, Siege, beide treffen und Torschützen
-              </p>
-            </div>
-          </div>
-
-          <div className="panel">
-            <label htmlFor="rasterCount">
-              Anzahl Tipps: <b>{rasterCount}</b>
-            </label>
-
-            <input
-              id="rasterCount"
-              type="range"
-              min="2"
-              max="10"
-              value={rasterCount}
-              onChange={e => {
-                const next = Number(e.target.value);
-                setRasterCount(next);
-                setRasterSelections(prev =>
-                  prev.slice(0, next)
-                );
-              }}
-            />
-
-            <div
-              style={{
-                display: 'grid',
-                gap: 9,
-                marginTop: 14
-              }}
-            >
-              <div>
-                <b>Auswahl:</b> {selectedRaster.length} von{' '}
-                {rasterCount}
-              </div>
-
-              <div>
-                <b>Sportfilter:</b> {tab}
-                {' '}(oben umschalten)
-              </div>
-
-              <p className="muted">
-                Ein Tipp pro Partie. Märkte ohne
-                Prognosemodell sind manuelle
-                Auswahlmöglichkeiten, keine Empfehlungen.
-                Für Torschützen erscheinen nur
-                unkalibrierte Modellschätzungen.
-              </p>
-
-              <button
-                type="button"
-                onClick={() => setRasterSelections([])}
-                style={{
-                  padding: '10px 12px',
-                  borderRadius: 10,
-                  background: '#fff',
-                  border: '1px solid #cbd5e1',
-                  fontWeight: 700
-                }}
-              >
-                Raster zurücksetzen
-              </button>
-            </div>
-          </div>
-
-          <div className="sectionhead">
-            <div>
-              <h2>
-                <Layers size={22} />
-                Mein Kombi-Raster
-              </h2>
-            </div>
-          </div>
-
-          {selectedRaster.length ? (
-            selectedRaster.map((m, i) => (
-              <div className="fixture" key={m.id}>
-                <div style={{ minWidth: 0 }}>
-                  <b>
-                    {i + 1}. {m.label}
-                  </b>
-
-                  <small>
-                    {m.game} · {m.sport}
-                  </small>
-
-                  <small>
-                    {m.probability != null
-                      ? `Torschützen-Schätzung: ${Math.round(m.probability * 100)}%`
-                      : 'Keine Markt-Wahrscheinlichkeit verfügbar'}
-                  </small>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => toggleRaster(m)}
-                  aria-label={`${m.label} entfernen`}
-                  style={{
-                    border: '1px solid #cbd5e1',
-                    borderRadius: 9,
-                    padding: 8,
-                    background: '#fff'
-                  }}
-                >
-                  ✕
-                </button>
-              </div>
-            ))
-          ) : (
-            <div className="panel">
-              <p className="muted">
-                Noch keine Tipps ausgewählt.
-                Wähle unten einen Markt pro Spiel.
-              </p>
-            </div>
-          )}
-
-          {selectedRaster.length < rasterCount && (
-            <p
-              className="muted"
-              style={{ margin: '12px 0' }}
-            >
-              Noch {rasterCount - selectedRaster.length}{' '}
-              Tipp(s) möglich. Es stehen{' '}
-              {new Set(
-                rasterMarkets.map(m => m.gameKey)
-              ).size}{' '}
-              Spiele zur Verfügung.
-            </p>
-          )}
-
-          <div className="sectionhead">
-            <div>
-              <h2>
-                <Calendar size={22} />
-                Märkte nach Spiel
-              </h2>
-              <p>
-                Pro Partie kannst du genau einen
-                Markt hinzufügen.
-              </p>
-            </div>
-          </div>
-
-          {games.length ? (
-            games.map(g => {
-              const key = `${g.sport}-${g.id}`;
-
-              const options = rasterMarkets.filter(
-                m => m.gameKey === key
-              );
-
-              const occupied = rasterUsedGames.has(key);
-
-              return (
-                <div
-                  className="panel"
-                  key={key}
-                  style={{ marginBottom: 12 }}
-                >
-                  <b>
-                    {g.home} – {g.away}
-                  </b>
-
-                  <p
-                    className="muted"
-                    style={{ margin: '5px 0 12px' }}
-                  >
-                    {g.league} · {g.sport} ·{' '}
-                    {clock(g.time)} Uhr
-                  </p>
-
-                  <div
-                    style={{
-                      display: 'flex',
-                      gap: 8,
-                      flexWrap: 'wrap'
-                    }}
-                  >
-                    {options.map(m => {
-                      const active =
-                        rasterSelections.includes(m.id);
-
-                      const blocked =
-                        !active &&
-                        (
-                          occupied ||
-                          selectedRaster.length >=
-                            rasterCount
-                        );
-
-                      return (
-                        <button
-                          key={m.id}
-                          type="button"
-                          disabled={blocked}
-                          onClick={() => toggleRaster(m)}
-                          style={{
-                            padding: '9px 11px',
-                            borderRadius: 10,
-                            border: active
-                              ? '2px solid #2563eb'
-                              : '1px solid #cbd5e1',
-                            background: active
-                              ? '#dbeafe'
-                              : '#fff',
-                            opacity: blocked ? 0.42 : 1,
-                            fontWeight: active ? 700 : 500,
-                            textAlign: 'left'
-                          }}
-                        >
-                          {active ? '✓ ' : ''}
-                          {m.label}
-                          {m.probability != null
-                            ? ` · ${Math.round(m.probability * 100)}%*`
-                            : ''}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })
-          ) : (
-            <Empty
-              message="Keine Spiele für den ausgewählten Tag und Sportfilter verfügbar."
-            />
-          )}
-
-          <p
-            className="muted"
-            style={{ fontSize: 12 }}
-          >
-            * Torschützen-Prozentwerte sind unkalibriert.
-            Über-Tore, Sieger und Beide-treffen-Märkte
-            haben noch keine berechneten Wahrscheinlichkeiten.
-            Keine Gewinngarantie.
-          </p>
-        </>
-      )}
-
-      {page === 'Spiele' && (
-        <>
-          <div className="sectionhead">
-            <div>
-              <h2>
-                <Calendar size={23} />
-                Spiele am Spieltag
-              </h2>
-              <p>
-                Spielzeiten in deutscher Zeitzone
-              </p>
-            </div>
-
-            <button
-              className="tiny"
-              onClick={load}
-              aria-label="Spiele aktualisieren"
-            >
-              <RefreshCw size={16} />
-            </button>
-          </div>
-
-          {games.length ? (
-            games.map((g, i) => (
-              <div
-                className="fixture"
-                key={`${g.sport}-${g.id}-${i}`}
-              >
-                <div>
-                  <b>
-                    {g.home} – {g.away}
-                  </b>
-                  <small>
-                    {g.league} · {g.sport}
-                  </small>
-                </div>
-
-                <strong>{clock(g.time)}</strong>
-              </div>
-            ))
-          ) : (
-            <Empty
-              message="Keine passenden Spiele gefunden."
-            />
-          )}
-        </>
-      )}
-
-      {page === 'Favoriten' && (
-        <Empty
-          message="Favoriten folgen in einem späteren Update."
-        />
-      )}
-
-      {page === 'Infos' && (
-        <div className="panel info">
-          <h2>Über GoalPulse</h2>
-
-          <p>
-            GoalPulse Analyse 3.0 berücksichtigt
-            bei Fußball Saison-Torquote und
-            verfügbare Schussdaten.
-          </p>
-
-          <p>
-            Bei NHL fließen Saison-Torquote,
-            Schüsse und bei ausgewählten Spielern
-            aktuelle Schüsse und Form ein.
-          </p>
-
-          <p>
-            DEL-Spiele werden angezeigt.
-            DEL-Spielerprognosen sind noch
-            nicht angebunden.
-          </p>
-
-          <p>
-            Der Kombi-Generator 3.2 unterstützt
-            2–10 Spieler, automatische und
-            manuelle Auswahl und maximal einen
-            Spieler pro Partie.
-          </p>
-
-          <p>
-            Der Multi-Markt-Raster kombiniert
-            manuell Über-Tore, Sieger, beide
-            treffen und Torschützen.
-            Für Spielmärkte fehlen noch
-            belastbare Wahrscheinlichkeiten.
-          </p>
-
-          <p>
-            xG, Gegnerstärke und bestätigte
-            Aufstellungen sind derzeit nicht
-            Bestandteil des Modells.
-          </p>
-
-          <p>
-            Die angezeigten Prozentwerte sind
-            nicht historisch kalibriert und
-            keine verlässlichen Wettquoten.
-          </p>
-        </div>
-      )}
-
-      <div className="space" />
-
-      <nav>
-        {nav.map(([name, Icon]) => (
-          <button
-            key={name}
-            className={
-              page === name ? 'current' : ''
-            }
-            onClick={() => setPage(name)}
-          >
-            <Icon size={22} />
-            <span>{name}</span>
-          </button>
-        ))}
-      </nav>
+        <h2 className="gp-section">📊 Alle Spiele & Märkte analysiert</h2>
+        <div className="gp-card"><div className="gp-row">{categories.map(c=><button key={c} className={`gp-btn ${categoryFilter===c?'on':''}`} onClick={()=>setCategoryFilter(c)}>{c}</button>)}</div></div>
+        {games.map(g=>{
+          const gameMarkets=markets.filter(m=>String(m.fixtureId)===String(g.id)&&m.sport===g.sport&&(categoryFilter==='Alle'||catName(m)===categoryFilter)).sort((a,b)=>rank(b)-rank(a));
+          return <div className="gp-card" key={`${g.sport}-${g.id}`}><div className="gp-row gp-between"><div><b>{g.home} – {g.away}</b><p className="gp-muted" style={{margin:'5px 0'}}>{g.league} · {g.sport} · {clock(g.time)} Uhr</p></div><span className="gp-muted">{gameMarkets.length} Märkte</span></div>{gameMarkets.length===0?<p className="gp-muted">Keine belastbaren Teamdaten / Marktprognosen verfügbar.</p>:gameMarkets.map(m=>{const selected=manualIds.includes(m.id);const blocked=!selected&&(manual.length>=count||!canAddMarket(m,manual));return <div className="gp-market" key={m.id}><div><b>{m.label}</b><small>{catName(m)} · {m.dataQuality} · {m.model}</small></div><div className="gp-row"><strong style={{color:'#65dcb5'}}>{Math.round(m.probability*100)}%</strong>{manualMode&&<button className={`gp-btn ${selected?'on':''}`} disabled={blocked} onClick={()=>toggleMarket(m)}>{selected?'✓':'+'}</button>}</div></div>;})}</div>;
+        })}
+        {games.length===0&&!loading&&<div className="gp-card">Keine Spiele am gewählten Datum gefunden.</div>}
+      </>}
+
+      {page==='Home' && <><h2 className="gp-section">🏆 Torschützen-Analyse</h2>{picks.length===0?<div className="gp-card">Keine Spielerprognosen verfügbar.</div>:picks.map((p,i)=><div className="gp-card" key={p.id}><div className="gp-row gp-between"><div><b>{i+1}. {p.name}</b><p className="gp-muted">{p.team} – {p.opponent} · {p.league} · {clock(p.time)} Uhr</p><p className="gp-muted">Saisontore: {p.goals??'–'} · Schüsse: {p.shots??'–'} · Form: {p.form??'–'} · {p.model}</p></div><div className="gp-pct">{Math.round(p.probability*100)}%</div></div></div>)}</>}
+      {page==='Spiele'&&<><h2 className="gp-section">📅 Spiele</h2>{games.map(g=><div className="gp-card" key={`${g.sport}-${g.id}`}><b>{g.home} – {g.away}</b><p className="gp-muted">{g.league} · {g.sport} · {clock(g.time)} Uhr</p></div>)}</>}
+      {page==='Infos'&&<div className="gp-card"><h2>Über GoalPulse 4.0</h2><p className="gp-muted">Fußball: API-SPORTS Topscorer und Ligatabellen. NHL: NHL-Spieler- und Teamstatistiken. DEL: Spielplan, noch keine Marktprognosen.</p><p className="gp-muted">Sieger, Über-Tore und Beide treffen werden aus erwarteten Teamtoren mit einem vereinfachten Poisson-Modell geschätzt. Die NHL-Siegwahrscheinlichkeit verteilt ein modelliertes Unentschieden näherungsweise auf beide Teams; tatsächliche Overtime-Stärken fehlen. Aufstellungen, Verletzungen, xG und Buchmacherquoten sind nicht berücksichtigt.</p><p className="gp-muted">Es werden keine Werte erfunden, wenn Statistikdaten fehlen. Die API benötigt für Fußball zusätzlich zu den bisherigen Torschützenabfragen Tabellenanfragen; dadurch können API-Limits früher erreicht werden.</p><p className="gp-muted">Alle Prognosen sind unkalibriert und können deutlich von tatsächlichen Eintrittshäufigkeiten abweichen.</p></div>}
+      <nav className="gp-nav">{[['Home',House],['Raster',Layers],['Spiele',Calendar],['Infos',Info]].map(([name,Icon])=><button key={name} className={`gp-btn ${page===name?'on':''}`} onClick={()=>setPage(name)}><Icon size={18}/><span>{name}</span></button>)}</nav>
     </div>
   );
 }
